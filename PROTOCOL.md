@@ -47,9 +47,9 @@ Rules:
 - Allowed tables: `session`, `task`, `task_round`, `agent`, `checklist_item`, `local_check`, `review_gate`, `open_work`, `ping`.
 - Allowed ops: `insert`, `update`, `delete`.
 
-`GET /sync/pull?after_hub_seq=N` returns events from devices whose GitHub login is visible to the caller.
+`GET /sync/pull?cursor=<origin_id>:<last_seq>&cursor=...` returns later events for every visible origin. An origin without a cursor starts at 0, so a new teammate is fully backfilled.
 
-`GET /sync/restore` returns the caller's full own event log plus the current row replica for every visible login. A wiped laptop replays `own_events` in `origin_seq` order and applies `rows` for teammates.
+`GET /sync/restore` returns every visible event (`events`) and the caller's own subset (`own_events`). A wiped laptop replays `events` in origin sequence order.
 
 `GET /sync/ws?token=...` pushes `{type: events|ping|hello|ping}` when new data arrives.
 

@@ -44,12 +44,12 @@ def test_push_pull_restore_and_team_isolation(hub: TestClient) -> None:
         json={"events": [event(dave_dev, 1, row_id="row-d", title="Dave secret")]},
     )
 
-    alice_pull = hub.get("/sync/pull", headers={"Authorization": f"Bearer {alice}"}, params={"after_hub_seq": "0"})
+    alice_pull = hub.get("/sync/pull", headers={"Authorization": f"Bearer {alice}"})
     titles = {e["payload"]["title"] for e in alice_pull.json()["events"]}
     assert titles == {"Alice task", "Bob task"}
     assert "Dave secret" not in titles
 
-    dave_pull = hub.get("/sync/pull", headers={"Authorization": f"Bearer {dave}"}, params={"after_hub_seq": "0"})
+    dave_pull = hub.get("/sync/pull", headers={"Authorization": f"Bearer {dave}"})
     dave_titles = {e["payload"]["title"] for e in dave_pull.json()["events"]}
     assert dave_titles == {"Dave secret"}
 
@@ -57,8 +57,8 @@ def test_push_pull_restore_and_team_isolation(hub: TestClient) -> None:
     body = restore.json()
     assert body["login"] == "alice"
     assert len(body["own_events"]) == 1
-    replica_titles = {row["payload"]["title"] for row in body["rows"] if row["table"] == "task"}
-    assert replica_titles == {"Alice task", "Bob task"}
+    restore_titles = {e["payload"]["title"] for e in body["events"]}
+    assert restore_titles == {"Alice task", "Bob task"}
 
 
 def test_foreign_origin_rejected(hub: TestClient) -> None:

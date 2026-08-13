@@ -165,11 +165,20 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         device_id = _require_str(body, "device_id")
         challenge = _require_str(body, "challenge")
         name = _require_str(body, "device_name")
-        if len(challenge) < 16:
-            raise HTTPException(status_code=400, detail="challenge is too short")
+        if len(challenge) < 16 or len(challenge) > 128:
+            raise HTTPException(status_code=400, detail="challenge length is invalid")
+        if len(name) > 128 or len(device_id) > 80:
+            raise HTTPException(status_code=400, detail="device fields are too long")
         existing = hub.store.query_one("SELECT id FROM device WHERE id = ?", (device_id,))
         if existing is not None:
             raise HTTPException(status_code=409, detail="device is already paired")
+        hub.store.execute(
+            "DELETE FROM pending_pair WHERE created_at < ?",
+            (_cutoff(),),
+        )
+        pending = hub.store.query_one("SELECT COUNT(*) AS n FROM pending_pair")
+        if pending is not None and int(pending["n"]) >= 200:
+            raise HTTPException(status_code=429, detail="too many pending pairing challenges")
         hub.store.execute(
             "INSERT OR REPLACE INTO pending_pair (challenge, device_id, device_name, created_at, token, github_login) "
             "VALUES (?, ?, ?, ?, NULL, NULL)",
@@ -179,6 +188,9 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
 
     @app.get("/pair/wait")
     def pair_wait(device_id: str, challenge: str) -> dict[str, Any]:
+        claimed = hub.store.claim_pair_token(challenge, device_id, _cutoff())
+        if claimed is not None:
+            return {"status": "paired", "token": claimed[0], "login": claimed[1]}
         row = hub.store.query_one(
             "SELECT * FROM pending_pair WHERE challenge = ? AND device_id = ?",
             (challenge, device_id),
@@ -187,13 +199,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
             raise HTTPException(status_code=404, detail="unknown pairing challenge")
         if _age_seconds(row["created_at"]) > PAIR_TTL_SECONDS:
             raise HTTPException(status_code=410, detail="pairing challenge expired")
-        if row["token"] is None:
-            return {"status": "pending"}
-        hub.store.execute(
-            "UPDATE pending_pair SET token = NULL WHERE challenge = ? AND device_id = ?",
-            (challenge, device_id),
-        )
-        return {"status": "paired", "token": row["token"], "login": row["github_login"]}
+        return {"status": "pending"}
 
     @app.post("/pair/confirm")
     def pair_confirm(request: Request, body: dict[str, Any]) -> dict[str, str]:
@@ -250,38 +256,19 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         return {"accepted": accepted}
 
     @app.get("/sync/pull")
-    def sync_pull(request: Request, after_hub_seq: str | None = None) -> dict[str, Any]:
+    def sync_pull(request: Request) -> dict[str, Any]:
         device = hub.device_for_token(bearer(request))
-        after = _require_int_string("after_hub_seq", after_hub_seq if after_hub_seq is not None else "0")
-        allowed = hub.visible(device["github_login"])
-        rows = hub.store.query(
-            "SELECT e.* FROM ledger_event e "
-            "JOIN device d ON d.id = e.origin_device_id "
-            "WHERE e.hub_seq > ? AND d.github_login IN ({}) "
-            "ORDER BY e.hub_seq ASC".format(_placeholders(allowed)),
-            (after, *sorted(allowed)),
-        )
-        return {"events": [_event_out(r) for r in rows]}
+        return {"events": _visible_events(hub, device["github_login"], _cursors(request))}
 
     @app.get("/sync/restore")
     def sync_restore(request: Request) -> dict[str, Any]:
         device = hub.device_for_token(bearer(request))
-        allowed = hub.visible(device["github_login"])
-        own = hub.store.query(
-            "SELECT * FROM ledger_event WHERE origin_device_id = ? ORDER BY origin_seq ASC",
-            (device["id"],),
-        )
-        replicas = hub.store.query(
-            "SELECT * FROM row_replica WHERE github_login IN ({})".format(_placeholders(allowed)),
-            tuple(sorted(allowed)),
-        )
-        last = hub.store.query_one("SELECT COALESCE(MAX(hub_seq), 0) AS m FROM ledger_event")
+        events = _visible_events(hub, device["github_login"], {})
         return {
             "device_id": device["id"],
             "login": device["github_login"],
-            "own_events": [_event_out(r) for r in own],
-            "rows": [_replica_out(r) for r in replicas],
-            "hub_seq": int(last["m"]) if last is not None else 0,
+            "events": events,
+            "own_events": [e for e in events if e["origin_device_id"] == device["id"]],
         }
 
     @app.get("/api/state")
@@ -348,17 +335,13 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
             "created_at": utcnow(),
             "acked_at": None,
         }
-        hub.store.execute(
-            "INSERT INTO row_replica (table_name, row_id, origin_device_id, github_login, payload, updated_at) "
-            "VALUES ('ping', ?, '', ?, ?, ?)",
-            (ping_id, login, dumps(payload), utcnow()),
-        )
-        await hub.publish({"type": "ping", "from": login, "to": target, "id": ping_id})
+        _record_web_event(hub, login, "ping", "insert", ping_id, payload)
+        await hub.publish({"type": "ping", "from": login, "to": target, "id": ping_id, "login": login})
         return {"id": ping_id}
 
     @app.post("/api/pings/{ping_id}/ack")
-    def api_ping_ack(request: Request, ping_id: str) -> dict[str, str]:
-        login = hub.session_login(request)
+    def api_ping_ack(request: Request, ping_id: str) -> dict[str, Any]:
+        login = _any_login(hub, request)
         row = hub.store.query_one(
             "SELECT * FROM row_replica WHERE table_name = 'ping' AND row_id = ?",
             (ping_id,),
@@ -369,11 +352,8 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         if payload.get("to_login") != login:
             raise HTTPException(status_code=403, detail="only the recipient can ack")
         payload["acked_at"] = utcnow()
-        hub.store.execute(
-            "UPDATE row_replica SET payload = ?, updated_at = ? WHERE table_name = 'ping' AND row_id = ?",
-            (dumps(payload), utcnow(), ping_id),
-        )
-        return {"id": ping_id, "acked_at": payload["acked_at"]}
+        _record_web_event(hub, login, "ping", "update", ping_id, payload, keep_origin=row["origin_device_id"])
+        return {"id": ping_id, "acked_at": payload["acked_at"], "payload": payload}
 
     @app.get("/api/stream")
     async def api_stream(request: Request):
@@ -433,6 +413,87 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                 hub.queues.remove(item)
 
     return app
+
+
+def _cutoff() -> str:
+    from datetime import datetime, timedelta, timezone
+
+    stamp = datetime.now(timezone.utc) - timedelta(seconds=PAIR_TTL_SECONDS)
+    return stamp.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _cursors(request: Request) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for raw in request.query_params.getlist("cursor"):
+        if ":" not in raw:
+            raise HTTPException(status_code=400, detail="cursor must be origin_id:seq")
+        origin, seq = raw.rsplit(":", 1)
+        if origin == "" or not seq.isdigit():
+            raise HTTPException(status_code=400, detail="cursor must be origin_id:seq")
+        out[origin] = int(seq)
+    return out
+
+
+def _visible_events(hub: Hub, login: str, cursors: dict[str, int]) -> list[dict[str, Any]]:
+    allowed = hub.visible(login)
+    origins = {row["id"] for row in hub.store.query("SELECT id FROM device WHERE github_login IN ({})".format(_placeholders(allowed)), tuple(sorted(allowed)))}
+    origins.update(
+        row["origin_device_id"]
+        for row in hub.store.query(
+            "SELECT DISTINCT origin_device_id FROM row_replica WHERE github_login IN ({})".format(_placeholders(allowed)),
+            tuple(sorted(allowed)),
+        )
+    )
+    events: list[dict[str, Any]] = []
+    for origin in sorted(origins):
+        after = cursors.get(origin, 0)
+        rows = hub.store.query(
+            "SELECT e.* FROM ledger_event e WHERE e.origin_device_id = ? AND e.origin_seq > ? ORDER BY e.origin_seq ASC",
+            (origin, after),
+        )
+        events.extend(_event_out(r) for r in rows)
+    events.sort(key=lambda e: (e["origin_device_id"], e["origin_seq"]))
+    return events
+
+
+def _record_web_event(
+    hub: Hub,
+    login: str,
+    table: str,
+    op: str,
+    row_id: str,
+    payload: dict[str, Any],
+    keep_origin: str | None = None,
+) -> None:
+    origin = keep_origin if keep_origin not in (None, "") else f"web:{login}"
+    last = hub.store.query_one(
+        "SELECT COALESCE(MAX(origin_seq), 0) AS m FROM ledger_event WHERE origin_device_id = ?",
+        (origin,),
+    )
+    seq = int(last["m"]) + 1 if last is not None else 1
+    encoded = dumps(payload)
+    occurred = utcnow()
+    hub.store.execute(
+        "INSERT INTO ledger_event (origin_device_id, origin_seq, table_name, op, row_id, payload, occurred_at, received_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (origin, seq, table, op, row_id, encoded, occurred, occurred),
+    )
+    if op == "delete":
+        hub.store.execute("DELETE FROM row_replica WHERE table_name = ? AND row_id = ?", (table, row_id))
+        return
+    hub.store.execute(
+        "INSERT INTO row_replica (table_name, row_id, origin_device_id, github_login, payload, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(table_name, row_id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at",
+        (table, row_id, origin, login, encoded, occurred),
+    )
+
+
+def _any_login(hub: Hub, request: Request) -> str:
+    header = request.headers.get("authorization")
+    if header and header.lower().startswith("bearer "):
+        return hub.device_for_token(header[7:].strip())["github_login"]
+    return hub.session_login(request)
 
 
 def _require_str(body: dict[str, Any], key: str) -> str:
@@ -544,11 +605,16 @@ def _accept_event(hub: Hub, device: dict[str, Any], event: dict[str, Any]) -> No
     if seq != last_seq + 1:
         raise HTTPException(status_code=409, detail=f"origin_seq gap: have {last_seq}, got {seq}")
     replica = hub.store.query_one(
-        "SELECT origin_device_id FROM row_replica WHERE table_name = ? AND row_id = ?",
+        "SELECT origin_device_id, payload FROM row_replica WHERE table_name = ? AND row_id = ?",
         (table, row_id),
     )
-    if replica is not None and replica["origin_device_id"] != origin:
+    ping_ack = False
+    if table == "ping" and op == "update" and replica is not None:
+        previous = loads(replica["payload"])
+        ping_ack = previous.get("to_login") == device["github_login"] and previous.get("id") == payload.get("id")
+    if replica is not None and replica["origin_device_id"] != origin and not ping_ack:
         raise HTTPException(status_code=403, detail="row belongs to another device")
+    write_origin = replica["origin_device_id"] if ping_ack and replica is not None else origin
     hub.store.execute(
         "INSERT INTO ledger_event (origin_device_id, origin_seq, table_name, op, row_id, payload, occurred_at, received_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -560,10 +626,16 @@ def _accept_event(hub: Hub, device: dict[str, Any], event: dict[str, Any]) -> No
             (table, row_id),
         )
         return
+    if ping_ack:
+        hub.store.execute(
+            "UPDATE row_replica SET payload = ?, updated_at = ? WHERE table_name = ? AND row_id = ?",
+            (encoded, utcnow(), table, row_id),
+        )
+        return
     hub.store.execute(
         "INSERT INTO row_replica (table_name, row_id, origin_device_id, github_login, payload, updated_at) "
         "VALUES (?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(table_name, row_id) DO UPDATE SET origin_device_id = excluded.origin_device_id, "
         "github_login = excluded.github_login, payload = excluded.payload, updated_at = excluded.updated_at",
-        (table, row_id, origin, device["github_login"], encoded, utcnow()),
+        (table, row_id, write_origin, device["github_login"], encoded, utcnow()),
     )

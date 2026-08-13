@@ -86,6 +86,28 @@ class Store:
             cur = self._conn.execute(sql, tuple(params))
             return list(cur.fetchall())
 
+    def claim_pair_token(self, challenge: str, device_id: str, cutoff: str) -> tuple[str, str] | None:
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            cur = self._conn.execute(
+                "SELECT token, github_login FROM pending_pair "
+                "WHERE challenge = ? AND device_id = ? AND token IS NOT NULL AND created_at >= ?",
+                (challenge, device_id, cutoff),
+            )
+            row = cur.fetchone()
+            if row is None or row["token"] is None or row["github_login"] is None:
+                self._conn.commit()
+                return None
+            updated = self._conn.execute(
+                "UPDATE pending_pair SET token = NULL WHERE challenge = ? AND device_id = ? AND token = ?",
+                (challenge, device_id, row["token"]),
+            )
+            if updated.rowcount != 1:
+                self._conn.rollback()
+                return None
+            self._conn.commit()
+            return (row["token"], row["github_login"])
+
     def query_one(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Row | None:
         rows = self.query(sql, params)
         if not rows:
