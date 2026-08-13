@@ -1,0 +1,107 @@
+"""SQLite store for devices, pairing, events and materialized rows."""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+import threading
+from datetime import datetime, timezone
+from typing import Any, Iterable
+
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS device (
+  id TEXT PRIMARY KEY,
+  github_login TEXT NOT NULL,
+  name TEXT NOT NULL,
+  token_id TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL,
+  revoked_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS pending_pair (
+  challenge TEXT PRIMARY KEY,
+  device_id TEXT NOT NULL,
+  device_name TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  token TEXT,
+  github_login TEXT
+);
+
+CREATE TABLE IF NOT EXISTS ledger_event (
+  hub_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  origin_device_id TEXT NOT NULL,
+  origin_seq INTEGER NOT NULL,
+  table_name TEXT NOT NULL,
+  op TEXT NOT NULL,
+  row_id TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  occurred_at TEXT NOT NULL,
+  received_at TEXT NOT NULL,
+  UNIQUE (origin_device_id, origin_seq)
+);
+
+CREATE TABLE IF NOT EXISTS row_replica (
+  table_name TEXT NOT NULL,
+  row_id TEXT NOT NULL,
+  origin_device_id TEXT NOT NULL,
+  github_login TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (table_name, row_id)
+);
+
+CREATE INDEX IF NOT EXISTS event_origin_idx ON ledger_event (origin_device_id, origin_seq);
+CREATE INDEX IF NOT EXISTS replica_login_idx ON row_replica (github_login, table_name);
+CREATE INDEX IF NOT EXISTS device_login_idx ON device (github_login);
+"""
+
+
+def utcnow() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class Store:
+    def __init__(self, path: str) -> None:
+        self._lock = threading.Lock()
+        self._conn = sqlite3.connect(path, check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA foreign_keys = ON")
+        self._conn.execute("PRAGMA journal_mode = WAL")
+        self._conn.executescript(SCHEMA)
+        self._conn.commit()
+
+    def close(self) -> None:
+        with self._lock:
+            self._conn.close()
+
+    def execute(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
+        with self._lock:
+            cur = self._conn.execute(sql, tuple(params))
+            self._conn.commit()
+            return cur
+
+    def query(self, sql: str, params: Iterable[Any] = ()) -> list[sqlite3.Row]:
+        with self._lock:
+            cur = self._conn.execute(sql, tuple(params))
+            return list(cur.fetchall())
+
+    def query_one(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Row | None:
+        rows = self.query(sql, params)
+        if not rows:
+            return None
+        if len(rows) != 1:
+            raise RuntimeError(f"expected 0 or 1 row, got {len(rows)}")
+        return rows[0]
+
+
+def row_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {k: row[k] for k in row.keys()}
+
+
+def dumps(payload: Any) -> str:
+    return json.dumps(payload, separators=(",", ":"), sort_keys=True)
+
+
+def loads(raw: str) -> Any:
+    return json.loads(raw)

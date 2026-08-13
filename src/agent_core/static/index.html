@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent</title>
+  <style>
+    :root { font-family: ui-sans-serif, system-ui, sans-serif; color: #1a1a1a; background: #f4f1ea; }
+    body { margin: 24px; max-width: 1100px; }
+    h1 { font-size: 1.4rem; margin: 0 0 4px; }
+    .sub { color: #555; margin-bottom: 16px; }
+    .bar { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-bottom: 20px; }
+    button, a.btn { background: #1a1a1a; color: #fff; border: 0; border-radius: 6px; padding: 8px 14px; text-decoration: none; cursor: pointer; font-size: 0.95rem; }
+    button.secondary { background: #fff; color: #1a1a1a; border: 1px solid #ccc; }
+    .kpis { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
+    .kpi { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 12px 16px; min-width: 140px; }
+    .kpi b { display: block; font-size: 1.6rem; }
+    table { width: 100%; border-collapse: collapse; background: #fff; margin-bottom: 24px; }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #eee; font-size: 0.92rem; }
+    th { background: #efeae0; }
+    .working, .implementing { color: #0b5; font-weight: 600; }
+    .reviewing, .pr-review { color: #c60; font-weight: 600; }
+    .failed { color: #c00; font-weight: 600; }
+    #err { color: #c00; }
+    .hidden { display: none; }
+    input, select, textarea { padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px; font: inherit; }
+    label { display: block; margin: 8px 0; }
+  </style>
+</head>
+<body>
+  <h1>Agent</h1>
+  <p class="sub">Team ledger. Sign in with GitHub. <span id="stamp"></span></p>
+
+  <div id="signed-out" class="bar">
+    <a class="btn" href="/auth/github">Sign in with GitHub</a>
+  </div>
+
+  <div id="signed-in" class="hidden">
+    <div class="bar">
+      <span>Signed in as <b id="who"></b></span>
+      <span>Teams: <span id="team-list">—</span></span>
+      <button class="secondary" id="logout" type="button">Sign out</button>
+    </div>
+    <div id="pair-box" class="hidden">
+      <p>Confirm pairing this device to your GitHub account.</p>
+      <button type="button" id="confirm-pair">Pair this device</button>
+      <p id="pair-msg"></p>
+    </div>
+    <div class="kpis">
+      <div class="kpi"><span>Visible people</span><b id="k-people">–</b></div>
+      <div class="kpi"><span>Open tasks</span><b id="k-tasks">–</b></div>
+      <div class="kpi"><span>Working agents</span><b id="k-agents">–</b></div>
+      <div class="kpi"><span>Open pings</span><b id="k-pings">–</b></div>
+    </div>
+    <h2>Send a ping</h2>
+    <form id="ping-form">
+      <label>To <input name="to" required placeholder="github-login"></label>
+      <label>Kind
+        <select name="kind">
+          <option value="review-request">review-request</option>
+          <option value="ping">ping</option>
+          <option value="question">question</option>
+        </select>
+      </label>
+      <label>Task id <input name="task_id" placeholder="optional uuid"></label>
+      <label>Note <input name="body" placeholder="optional"></label>
+      <button type="submit">Send</button>
+    </form>
+    <h2>Tasks</h2>
+    <table id="tasks"><thead><tr><th>Owner</th><th>Title</th><th>State</th><th>Round</th><th>Workflow</th></tr></thead><tbody></tbody></table>
+    <h2>Pings</h2>
+    <table id="pings"><thead><tr><th>From</th><th>To</th><th>Kind</th><th>Task</th><th>Acked</th><th></th></tr></thead><tbody></tbody></table>
+    <h2>Devices</h2>
+    <table id="devices"><thead><tr><th>Owner</th><th>Name</th><th>Id</th><th>Created</th></tr></thead><tbody></tbody></table>
+  </div>
+  <p id="err" hidden></p>
+  <script>
+    function esc(s) {
+      return String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]));
+    }
+    const params = new URLSearchParams(location.search);
+    const challenge = params.get("challenge");
+
+    async function me() {
+      const res = await fetch("/auth/me");
+      if (res.status === 401) return null;
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      return res.json();
+    }
+
+    async function state() {
+      const res = await fetch("/api/state");
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      return res.json();
+    }
+
+    function fill(id, rows, cols) {
+      const tb = document.querySelector("#" + id + " tbody");
+      tb.innerHTML = rows.map(r => "<tr>" + cols.map(c => {
+        if (c === "_ack") {
+          if (r.acked_at || r.to_login !== window.__login) return "<td></td>";
+          return `<td><button type="button" data-ack="${esc(r.id)}">Ack</button></td>`;
+        }
+        const v = r[c];
+        const cls = (c === "state" || c === "status") ? ` class="${esc(v)}"` : "";
+        return `<td${cls}>${esc(v)}</td>`;
+      }).join("") + "</tr>").join("") || "<tr><td colspan='" + cols.length + "'>—</td></tr>";
+    }
+
+    async function render() {
+      const err = document.getElementById("err");
+      try {
+        const user = await me();
+        document.getElementById("signed-out").classList.toggle("hidden", !!user);
+        document.getElementById("signed-in").classList.toggle("hidden", !user);
+        if (!user) return;
+        window.__login = user.login;
+        document.getElementById("who").textContent = user.login;
+        document.getElementById("team-list").textContent = user.teams.length ? user.teams.join(", ") : "none (self only)";
+        if (challenge) document.getElementById("pair-box").classList.remove("hidden");
+        const data = await state();
+        err.hidden = true;
+        document.getElementById("stamp").textContent = data.generated_at;
+        const tasks = (data.task || []).filter(t => t.state !== "done" && t.state !== "failed");
+        const working = (data.agent || []).filter(a => a.status === "working");
+        const pings = (data.pings || []).filter(p => !p.acked_at);
+        document.getElementById("k-people").textContent = data.visible.length;
+        document.getElementById("k-tasks").textContent = tasks.length;
+        document.getElementById("k-agents").textContent = working.length;
+        document.getElementById("k-pings").textContent = pings.length;
+        fill("tasks", data.task || [], ["_github_login", "title", "state", "current_round", "workflow"]);
+        fill("pings", data.pings || [], ["from_login", "to_login", "kind", "task_id", "acked_at", "_ack"]);
+        fill("devices", (data.devices || []).filter(d => !d.revoked_at), ["github_login", "name", "id", "created_at"]);
+      } catch (e) {
+        err.hidden = false;
+        err.textContent = String(e);
+      }
+    }
+
+    document.getElementById("logout").onclick = async () => {
+      await fetch("/auth/logout", { method: "POST" });
+      location.href = "/";
+    };
+    document.getElementById("confirm-pair").onclick = async () => {
+      const res = await fetch("/pair/confirm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ challenge }),
+      });
+      const body = await res.json();
+      document.getElementById("pair-msg").textContent = res.ok
+        ? "Paired as " + body.login
+        : (body.detail || "pair failed");
+    };
+    document.getElementById("ping-form").onsubmit = async (ev) => {
+      ev.preventDefault();
+      const fd = new FormData(ev.target);
+      const payload = { to: fd.get("to"), kind: fd.get("kind"), body: fd.get("body") || "" };
+      if (fd.get("task_id")) payload.task_id = fd.get("task_id");
+      const res = await fetch("/api/pings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        document.getElementById("err").hidden = false;
+        document.getElementById("err").textContent = (await res.json()).detail || "ping failed";
+        return;
+      }
+      ev.target.reset();
+      render();
+    };
+    document.addEventListener("click", async (ev) => {
+      const id = ev.target && ev.target.getAttribute && ev.target.getAttribute("data-ack");
+      if (!id) return;
+      await fetch("/api/pings/" + id + "/ack", { method: "POST" });
+      render();
+    });
+    render();
+    setInterval(render, 2000);
+    try {
+      const es = new EventSource("/api/stream");
+      es.onmessage = () => render();
+    } catch (e) { /* dashboard still polls */ }
+  </script>
+</body>
+</html>

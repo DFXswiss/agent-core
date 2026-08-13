@@ -1,0 +1,9 @@
+# Team membership. Change this file with a pull request.
+# A logged-in GitHub user always sees their own ledger.
+# Being listed on a team additionally grants that team's ledgers.
+#
+# Logins are compared case-insensitively and stored lowercase.
+
+teams:
+  dfx:
+    members: []
