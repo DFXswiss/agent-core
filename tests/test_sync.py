@@ -84,6 +84,31 @@ def test_gap_rejected_idempotent_ok(hub: TestClient) -> None:
     clash = event(dev, 1, title="other")
     bad = hub.post("/sync/push", headers={"Authorization": f"Bearer {token}"}, json={"events": [clash]})
     assert bad.status_code == 409
+    time_clash = event(dev, 1)
+    time_clash["occurred_at"] = "2026-08-13T12:00:01Z"
+    assert hub.post("/sync/push", headers={"Authorization": f"Bearer {token}"}, json={"events": [time_clash]}).status_code == 409
+
+
+def test_cannot_overwrite_teammate_row(hub: TestClient) -> None:
+    alice_dev = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaa03"
+    bob_dev = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbb03"
+    alice = pair_device(hub, "code-alice", alice_dev)
+    bob = pair_device(hub, "code-bob", bob_dev)
+    shared = "shared-row"
+    assert (
+        hub.post(
+            "/sync/push",
+            headers={"Authorization": f"Bearer {alice}"},
+            json={"events": [event(alice_dev, 1, row_id=shared, title="Alice")]},
+        ).status_code
+        == 200
+    )
+    stolen = hub.post(
+        "/sync/push",
+        headers={"Authorization": f"Bearer {bob}"},
+        json={"events": [event(bob_dev, 1, row_id=shared, title="Bob stole it")]},
+    )
+    assert stolen.status_code == 403
 
 
 def test_ping_team_only(hub: TestClient) -> None:

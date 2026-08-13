@@ -32,7 +32,7 @@
   <p class="sub">Team ledger. Sign in with GitHub. <span id="stamp"></span></p>
 
   <div id="signed-out" class="bar">
-    <a class="btn" href="/auth/github">Sign in with GitHub</a>
+    <a class="btn" id="signin" href="/auth/github">Sign in with GitHub</a>
   </div>
 
   <div id="signed-in" class="hidden">
@@ -80,6 +80,9 @@
     }
     const params = new URLSearchParams(location.search);
     const challenge = params.get("challenge");
+    if (challenge) {
+      document.getElementById("signin").href = "/auth/github?next=" + encodeURIComponent("/pair?challenge=" + challenge);
+    }
 
     async function me() {
       const res = await fetch("/auth/me");

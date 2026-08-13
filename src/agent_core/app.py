@@ -43,7 +43,7 @@ class Hub:
         self.github = github
         self.store = store
         self.teams = teams
-        self.queues: list[asyncio.Queue[dict[str, Any]]] = []
+        self.queues: list[tuple[str, asyncio.Queue[dict[str, Any]]]] = []
 
     def visible(self, login: str) -> set[str]:
         return visible_logins(login, self.teams)
@@ -71,16 +71,28 @@ class Hub:
             raise HTTPException(status_code=401, detail="not signed in")
         return login
 
+    def _allowed_for(self, login: str, event: dict[str, Any]) -> bool:
+        visible = self.visible(login)
+        if event.get("to") == login or event.get("from") == login:
+            return True
+        owner = event.get("login")
+        if isinstance(owner, str):
+            return owner in visible
+        return False
+
     async def publish(self, event: dict[str, Any]) -> None:
-        dead: list[asyncio.Queue[dict[str, Any]]] = []
-        for queue in list(self.queues):
+        dead: list[tuple[str, asyncio.Queue[dict[str, Any]]]] = []
+        for item in list(self.queues):
+            login, queue = item
+            if not self._allowed_for(login, event):
+                continue
             try:
                 queue.put_nowait(event)
             except asyncio.QueueFull:
-                dead.append(queue)
-        for queue in dead:
-            if queue in self.queues:
-                self.queues.remove(queue)
+                dead.append(item)
+        for item in dead:
+            if item in self.queues:
+                self.queues.remove(item)
 
 
 def bearer(request: Request) -> str:
@@ -97,7 +109,12 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
     teams = load_teams(cfg.teams_path)
     hub = Hub(cfg, github or RealGitHub(cfg), store or Store(cfg.database), teams)
     app = FastAPI(title="agent-core", version="0.1.0")
-    app.add_middleware(SessionMiddleware, secret_key=cfg.session_secret, same_site="lax", https_only=False)
+    app.add_middleware(
+        SessionMiddleware,
+        secret_key=cfg.session_secret,
+        same_site="lax",
+        https_only=cfg.public_url.startswith("https://"),
+    )
     app.state.hub = hub
 
     @app.get("/health")
@@ -105,9 +122,13 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         return {"status": "ok"}
 
     @app.get("/auth/github")
-    def auth_start(request: Request) -> RedirectResponse:
+    def auth_start(request: Request, next: str | None = None) -> RedirectResponse:
         state = secrets.token_urlsafe(24)
         request.session["oauth_state"] = state
+        if next is not None:
+            if not next.startswith("/pair?"):
+                raise HTTPException(status_code=400, detail="next must be a /pair query")
+            request.session["after_login"] = next
         redirect_uri = f"{cfg.public_url}/auth/github/callback"
         return RedirectResponse(hub.github.authorize_url(state, redirect_uri), status_code=302)
 
@@ -124,7 +145,10 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
             raise HTTPException(status_code=401, detail=str(exc)) from exc
         request.session.pop("oauth_state", None)
         request.session["login"] = user.login
-        return RedirectResponse("/", status_code=302)
+        dest = request.session.pop("after_login", "/")
+        if not isinstance(dest, str) or not dest.startswith("/"):
+            dest = "/"
+        return RedirectResponse(dest, status_code=302)
 
     @app.post("/auth/logout")
     def auth_logout(request: Request) -> JSONResponse:
@@ -161,8 +185,14 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         )
         if row is None:
             raise HTTPException(status_code=404, detail="unknown pairing challenge")
+        if _age_seconds(row["created_at"]) > PAIR_TTL_SECONDS:
+            raise HTTPException(status_code=410, detail="pairing challenge expired")
         if row["token"] is None:
             return {"status": "pending"}
+        hub.store.execute(
+            "UPDATE pending_pair SET token = NULL WHERE challenge = ? AND device_id = ?",
+            (challenge, device_id),
+        )
         return {"status": "paired", "token": row["token"], "login": row["github_login"]}
 
     @app.post("/pair/confirm")
@@ -349,7 +379,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
     async def api_stream(request: Request):
         login = hub.session_login(request)
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=64)
-        hub.queues.append(queue)
+        hub.queues.append((login, queue))
 
         async def gen():
             try:
@@ -362,13 +392,11 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                     except asyncio.TimeoutError:
                         yield ":\n\n"
                         continue
-                    if item.get("to") and item["to"] != login and item.get("from") != login:
-                        if item.get("login") and item["login"] not in hub.visible(login):
-                            continue
                     yield f"data: {dumps(item)}\n\n"
             finally:
-                if queue in hub.queues:
-                    hub.queues.remove(queue)
+                item = (login, queue)
+                if item in hub.queues:
+                    hub.queues.remove(item)
 
         from fastapi.responses import StreamingResponse
 
@@ -387,7 +415,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
             return
         await ws.accept()
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=64)
-        hub.queues.append(queue)
+        hub.queues.append((device["github_login"], queue))
         try:
             await ws.send_json({"type": "hello", "login": device["github_login"], "device_id": device["id"]})
             while True:
@@ -400,8 +428,9 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         except WebSocketDisconnect:
             pass
         finally:
-            if queue in hub.queues:
-                hub.queues.remove(queue)
+            item = (device["github_login"], queue)
+            if item in hub.queues:
+                hub.queues.remove(item)
 
     return app
 
@@ -503,6 +532,7 @@ def _accept_event(hub: Hub, device: dict[str, Any], event: dict[str, Any]) -> No
             or existing["op"] != op
             or existing["row_id"] != row_id
             or existing["payload"] != encoded
+            or existing["occurred_at"] != occurred
         ):
             raise HTTPException(status_code=409, detail=f"origin_seq {seq} already exists with different content")
         return
@@ -513,6 +543,12 @@ def _accept_event(hub: Hub, device: dict[str, Any], event: dict[str, Any]) -> No
     last_seq = int(last["m"]) if last is not None else 0
     if seq != last_seq + 1:
         raise HTTPException(status_code=409, detail=f"origin_seq gap: have {last_seq}, got {seq}")
+    replica = hub.store.query_one(
+        "SELECT origin_device_id FROM row_replica WHERE table_name = ? AND row_id = ?",
+        (table, row_id),
+    )
+    if replica is not None and replica["origin_device_id"] != origin:
+        raise HTTPException(status_code=403, detail="row belongs to another device")
     hub.store.execute(
         "INSERT INTO ledger_event (origin_device_id, origin_seq, table_name, op, row_id, payload, occurred_at, received_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",

@@ -48,3 +48,27 @@ def test_unknown_code_rejected(hub: TestClient) -> None:
 def test_expired_state_rejected(hub: TestClient) -> None:
     bad = hub.get("/auth/github/callback", params={"code": "code-alice", "state": "wrong"})
     assert bad.status_code == 400
+
+
+def test_oauth_returns_to_pair_url(hub: TestClient) -> None:
+    start = hub.get("/auth/github", params={"next": "/pair?challenge=abc1234567890abc"}, follow_redirects=False)
+    state = start.headers["location"].split("state=")[1].split("&")[0]
+    done = hub.get("/auth/github/callback", params={"code": "code-alice", "state": state}, follow_redirects=False)
+    assert done.status_code == 302
+    assert done.headers["location"] == "/pair?challenge=abc1234567890abc"
+
+
+def test_oauth_rejects_open_redirect(hub: TestClient) -> None:
+    bad = hub.get("/auth/github", params={"next": "https://evil.example/"}, follow_redirects=False)
+    assert bad.status_code == 400
+
+
+def test_pair_token_is_one_shot(hub: TestClient) -> None:
+    token = pair_device(hub, "code-alice", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaa09")
+    assert token
+    again = hub.get(
+        "/pair/wait",
+        params={"device_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaa09", "challenge": "challenge-aaaaaaaaaaaaaaaa"},
+    )
+    assert again.status_code == 200
+    assert again.json()["status"] == "pending"
