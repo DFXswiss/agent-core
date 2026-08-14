@@ -35,6 +35,16 @@ def test_duplicate_member_fail_closed(tmp_path: Path) -> None:
         load_teams(path)
 
 
+def test_checked_in_teams_yaml_loads() -> None:
+    path = Path(__file__).resolve().parents[1] / "teams.yaml"
+    teams = load_teams(path)
+    assert "dfx" in teams
+    members = set(teams["dfx"])
+    assert members == {m.lower() for m in members}
+    assert "taprootfreak" in members
+    assert "davidleomay" in members
+
+
 def test_missing_teams_key(tmp_path: Path) -> None:
     path = tmp_path / "teams.yaml"
     path.write_text("other: 1\n", encoding="utf-8")
