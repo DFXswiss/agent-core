@@ -52,6 +52,9 @@ jobs:
             "## Automatic Release PR" \
             "" \
             "This PR was automatically created after changes were pushed to develop." \
+            "It is the only path from develop onto main for this repository." \
+            "Merging it publishes the production image tag and is a human decision." \
+            "Do not merge until develop has been checked on the development hub." \
             "" \
             "**Commits:** ${COMMIT_COUNT} new commit(s)" \
             "" \
