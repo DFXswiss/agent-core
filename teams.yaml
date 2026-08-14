@@ -6,4 +6,6 @@
 
 teams:
   dfx:
-    members: []
+    members:
+      - taprootfreak
+      - davidleomay
