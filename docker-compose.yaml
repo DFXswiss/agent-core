@@ -1,0 +1,22 @@
+services:
+  hub:
+    build: .
+    ports:
+      - "8787:8787"
+    environment:
+      AGENT_CORE_PUBLIC_URL: http://127.0.0.1:8787
+      AGENT_CORE_SESSION_SECRET: ${AGENT_CORE_SESSION_SECRET}
+      AGENT_CORE_GITHUB_CLIENT_ID: ${AGENT_CORE_GITHUB_CLIENT_ID}
+      AGENT_CORE_GITHUB_CLIENT_SECRET: ${AGENT_CORE_GITHUB_CLIENT_SECRET}
+      AGENT_CORE_GITHUB_AUTHORIZE_URL: https://github.com/login/oauth/authorize
+      AGENT_CORE_GITHUB_TOKEN_URL: https://github.com/login/oauth/access_token
+      AGENT_CORE_GITHUB_USER_URL: https://api.github.com/user
+      AGENT_CORE_DATABASE: /data/hub.sqlite
+      AGENT_CORE_TEAMS: /app/teams.yaml
+      AGENT_CORE_HOST: 0.0.0.0
+      AGENT_CORE_PORT: "8787"
+    volumes:
+      - hub-data:/data
+
+volumes:
+  hub-data:
