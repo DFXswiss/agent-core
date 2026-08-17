@@ -738,6 +738,20 @@ def _parse_control_body(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
             if not isinstance(command, str) or len(command) < 1 or len(command) > 4000:
                 raise HTTPException(status_code=400, detail="command must be a string of length 1..4000")
             payload["command"] = command
+        if "provider" in body and body["provider"] is not None:
+            provider = body["provider"]
+            if provider != "grok":
+                raise HTTPException(status_code=400, detail="provider must be grok")
+            payload["provider"] = "grok"
+        if "model" in body and body["model"] is not None:
+            model = body["model"]
+            if not isinstance(model, str) or len(model) < 1 or len(model) > 64:
+                raise HTTPException(status_code=400, detail="model must be a string of length 1..64")
+            payload["model"] = model
+        if payload.get("provider") and payload.get("command"):
+            raise HTTPException(status_code=400, detail="provider and command cannot both be set")
+        if "model" in payload and payload.get("provider") != "grok":
+            raise HTTPException(status_code=400, detail="model requires provider grok")
         cols = _optional_dim(body, "cols")
         rows = _optional_dim(body, "rows")
         if cols is not None:

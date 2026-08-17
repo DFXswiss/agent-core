@@ -91,12 +91,14 @@ The hub is a relay only. It does not run tmux, does not start processes, and doe
 
 Body (one of):
 
-- `{ "action": "start", "command"?: string, "cols"?: int, "rows"?: int }`
+- `{ "action": "start", "command"?: string, "provider"?: "grok", "model"?: string, "cols"?: int, "rows"?: int }`
 - `{ "action": "stop" }`
 - `{ "action": "input", "data": string }` **xor** `{ "action": "input", "key": "enter"|"ctrl-c"|"tab" }`
 - `{ "action": "resize", "cols": int, "rows": int }`
 
-Validation (400): `action` required and one of those four; `command` if present is a string of length 1..4000; `data` if present is a string with utf-8 byte length 1..4096; `key` if present is exactly `enter`|`ctrl-c`|`tab`; input must have exactly one of `data` or `key`; `cols`/`rows` if present are integers 1..500; resize requires both; unknown extra keys are ignored.
+Validation (400): `action` required and one of those four; `command` if present is a string of length 1..4000; `provider` if present is exactly `grok`; `model` if present is a string of length 1..64 and requires `provider=grok`; `provider` and `command` cannot both be set; `data` if present is a string with utf-8 byte length 1..4096; `key` if present is exactly `enter`|`ctrl-c`|`tab`; input must have exactly one of `data` or `key`; `cols`/`rows` if present are integers 1..500; resize requires both; unknown extra keys are ignored.
+
+`provider=grok` is launch metadata for the owning device. The hub does not run `grok`. The device mints a UUID for Grok `--session-id` (it never forwards the ledger session id) and later uses `--resume` with `runtime.grok_session_id`. An empty model becomes `grok-4.6` on the device.
 
 Authz:
 
@@ -121,7 +123,7 @@ Forwarded WebSocket frame to the device:
 
 Payload contents:
 
-- start: include `command` only if provided; include `cols`/`rows` only if provided
+- start: include `command` only if provided; include `provider` / `model` only if provided; include `cols`/`rows` only if provided
 - stop: `{}`
 - input: `{ "data": "..." }` or `{ "key": "enter" }`
 - resize: `{ "cols": N, "rows": N }`

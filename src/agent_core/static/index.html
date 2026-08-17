@@ -76,6 +76,7 @@
       <p id="device-offline" class="hidden">device offline</p>
       <div id="session-controls" class="hidden">
         <button type="button" id="ctrl-start">Start</button>
+        <button type="button" id="ctrl-start-grok">Start Grok</button>
         <button type="button" id="ctrl-stop">Stop</button>
         <input id="ctrl-input" type="text" placeholder="type input" autocomplete="off">
         <button type="button" id="ctrl-send">Send</button>
@@ -164,7 +165,7 @@
 
     function setControlEnabled(online) {
       document.getElementById("device-offline").classList.toggle("hidden", online);
-      ["ctrl-start", "ctrl-stop", "ctrl-send", "ctrl-c", "ctrl-input"].forEach(id => {
+      ["ctrl-start", "ctrl-start-grok", "ctrl-stop", "ctrl-send", "ctrl-c", "ctrl-input"].forEach(id => {
         document.getElementById(id).disabled = !online;
       });
     }
@@ -325,6 +326,7 @@
     };
     document.getElementById("session-close").onclick = () => closeSessionDetail();
     document.getElementById("ctrl-start").onclick = () => postControl({ action: "start" });
+    document.getElementById("ctrl-start-grok").onclick = () => postControl({ action: "start", provider: "grok" });
     document.getElementById("ctrl-stop").onclick = () => postControl({ action: "stop" });
     document.getElementById("ctrl-send").onclick = () => {
       const data = document.getElementById("ctrl-input").value;

@@ -253,6 +253,45 @@ def test_second_device_does_not_receive_control(hub: TestClient) -> None:
             assert qb.empty()
 
 
+def test_start_provider_grok_forwards(hub: TestClient) -> None:
+    alice_dev = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaa009"
+    alice_token = pair_device(hub, "code-alice", alice_dev)
+    sid = "sess-alice-9"
+    hub.post(
+        "/sync/push",
+        headers={"Authorization": f"Bearer {alice_token}"},
+        json={"events": [session_event(alice_dev, 1, sid)]},
+    )
+    sign_in(hub, "code-alice")
+    with hub.websocket_connect(f"/sync/ws?token={alice_token}") as ws:
+        ws.receive_json()
+        ws.send_json({"type": "control-ready"})
+        _wait_control_connected(hub, sid, expect=True)
+        r = hub.post(f"/api/sessions/{sid}/control", json={"action": "start", "provider": "grok"})
+        assert r.status_code == 202, r.text
+        frame = _recv_until(ws, lambda m: m.get("type") == "control")
+        assert frame["payload"] == {"provider": "grok"}
+
+
+def test_start_provider_not_grok_is_400(hub: TestClient) -> None:
+    alice_dev = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaa010"
+    alice_token = pair_device(hub, "code-alice", alice_dev)
+    sid = "sess-alice-10"
+    hub.post(
+        "/sync/push",
+        headers={"Authorization": f"Bearer {alice_token}"},
+        json={"events": [session_event(alice_dev, 1, sid)]},
+    )
+    sign_in(hub, "code-alice")
+    r = hub.post(f"/api/sessions/{sid}/control", json={"action": "start", "provider": "claude"})
+    assert r.status_code == 400
+    both = hub.post(
+        f"/api/sessions/{sid}/control",
+        json={"action": "start", "provider": "grok", "command": "bash"},
+    )
+    assert both.status_code == 400
+
+
 def test_control_does_not_write_session_ledger(hub: TestClient) -> None:
     alice_dev = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaa008"
     alice_token = pair_device(hub, "code-alice", alice_dev)
