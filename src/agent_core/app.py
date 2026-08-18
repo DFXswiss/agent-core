@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from starlette.middleware.sessions import SessionMiddleware
 
 from .config import Config
@@ -34,7 +34,11 @@ ALLOWED_TABLES = frozenset(
 )
 ALLOWED_OPS = frozenset({"insert", "update", "delete"})
 PING_KINDS = frozenset({"review-request", "ping", "question"})
+CONTROL_ACTIONS = frozenset({"start", "stop", "input", "resize"})
+CONTROL_KEYS = frozenset({"enter", "ctrl-c", "tab"})
 PAIR_TTL_SECONDS = 600
+TERMINAL_RING_SIZE = 64
+TERMINAL_CHUNK_MAX = 8192
 
 
 class Hub:
@@ -44,6 +48,9 @@ class Hub:
         self.store = store
         self.teams = teams
         self.queues: list[tuple[str, asyncio.Queue[dict[str, Any]]]] = []
+        self.control_ready: dict[str, asyncio.Queue[dict[str, Any]]] = {}
+        self.terminal_rings: dict[str, list[dict[str, Any]]] = {}
+        self.terminal_queues: list[tuple[str, str, asyncio.Queue[dict[str, Any]]]] = []
 
     def visible(self, login: str) -> set[str]:
         return visible_logins(login, self.teams)
@@ -94,6 +101,21 @@ class Hub:
             if item in self.queues:
                 self.queues.remove(item)
 
+    def publish_terminal(self, event: dict[str, Any]) -> None:
+        session_id = event.get("session_id")
+        dead: list[tuple[str, str, asyncio.Queue[dict[str, Any]]]] = []
+        for item in list(self.terminal_queues):
+            _login, sid, queue = item
+            if sid != session_id:
+                continue
+            try:
+                queue.put_nowait(event)
+            except asyncio.QueueFull:
+                dead.append(item)
+        for item in dead:
+            if item in self.terminal_queues:
+                self.terminal_queues.remove(item)
+
 
 def bearer(request: Request) -> str:
     header = request.headers.get("authorization")
@@ -103,6 +125,16 @@ def bearer(request: Request) -> str:
     if token == "":
         raise HTTPException(status_code=401, detail="Authorization Bearer token is required")
     return token
+
+
+def can_control(hub: Hub, login: str, origin_device_id: str) -> bool:
+    if not isinstance(origin_device_id, str) or origin_device_id == "":
+        return False
+    row = hub.store.query_one(
+        "SELECT id FROM device WHERE id = ? AND revoked_at IS NULL AND github_login = ?",
+        (origin_device_id, login),
+    )
+    return row is not None
 
 
 def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = None) -> FastAPI:
@@ -298,7 +330,14 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                 "WHERE table_name = ? AND github_login IN ({})".format(_placeholders(allowed)),
                 (table, *sorted(allowed)),
             )
-            out[key] = [_payload_with_origin(r) for r in rows]
+            items = [_payload_with_origin(r) for r in rows]
+            if key == "session":
+                for item in items:
+                    origin = item.get("_origin_device_id")
+                    origin_s = origin if isinstance(origin, str) else ""
+                    item["can_control"] = can_control(hub, login, origin_s)
+                    item["control_connected"] = origin_s in hub.control_ready
+            out[key] = items
         devices = hub.store.query(
             "SELECT id, github_login, name, created_at, revoked_at FROM device "
             "WHERE github_login IN ({})".format(_placeholders(allowed)),
@@ -306,6 +345,82 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         )
         out["devices"] = [row_dict(r) for r in devices]
         return out
+
+    @app.get("/api/sessions/{session_id}")
+    def api_session_detail(request: Request, session_id: str) -> dict[str, Any]:
+        login = hub.session_login(request)
+        row = _visible_session_row(hub, login, session_id)
+        payload = loads(row["payload"])
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=500, detail="replica payload is not an object")
+        origin = row["origin_device_id"]
+        return {
+            "id": session_id,
+            "payload": payload,
+            "_github_login": row["github_login"],
+            "_origin_device_id": origin,
+            "can_control": can_control(hub, login, origin),
+            "control_connected": origin in hub.control_ready,
+        }
+
+    @app.post("/api/sessions/{session_id}/control")
+    async def api_session_control(request: Request, session_id: str, body: dict[str, Any]) -> JSONResponse:
+        login = _any_login(hub, request)
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="body must be an object")
+        action, payload = _parse_control_body(body)
+        row = _visible_session_row(hub, login, session_id)
+        origin = row["origin_device_id"]
+        if not can_control(hub, login, origin):
+            raise HTTPException(status_code=403, detail="not the owning device")
+        queue = hub.control_ready.get(origin)
+        if queue is None:
+            raise HTTPException(status_code=409, detail="owning device is not control-connected")
+        frame = {
+            "type": "control",
+            "session_id": session_id,
+            "action": action,
+            "payload": payload,
+        }
+        try:
+            queue.put_nowait(frame)
+        except asyncio.QueueFull as exc:
+            raise HTTPException(status_code=503, detail="control queue is full") from exc
+        return JSONResponse({"queued": True}, status_code=202)
+
+    @app.get("/api/sessions/{session_id}/terminal")
+    async def api_session_terminal(request: Request, session_id: str):
+        login = hub.session_login(request)
+        _visible_session_row(hub, login, session_id)
+        accept = request.headers.get("accept") or ""
+        if "text/event-stream" in accept:
+            queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=64)
+            hub.terminal_queues.append((login, session_id, queue))
+
+            async def gen():
+                try:
+                    yield f"data: {dumps({'type': 'hello', 'session_id': session_id})}\n\n"
+                    for chunk in list(hub.terminal_rings.get(session_id, [])):
+                        yield (
+                            f"data: {dumps({'type': 'terminal', 'session_id': session_id, 'seq': chunk['seq'], 'data': chunk['data']})}\n\n"
+                        )
+                    while True:
+                        if await request.is_disconnected():
+                            break
+                        try:
+                            item = await asyncio.wait_for(queue.get(), timeout=20.0)
+                        except asyncio.TimeoutError:
+                            yield ":\n\n"
+                            continue
+                        yield f"data: {dumps(item)}\n\n"
+                finally:
+                    item = (login, session_id, queue)
+                    if item in hub.terminal_queues:
+                        hub.terminal_queues.remove(item)
+
+            return StreamingResponse(gen(), media_type="text/event-stream")
+        chunks = list(hub.terminal_rings.get(session_id, []))
+        return {"session_id": session_id, "chunks": chunks}
 
     @app.post("/api/pings")
     async def api_ping(request: Request, body: dict[str, Any]) -> dict[str, str]:
@@ -378,8 +493,6 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                 if item in hub.queues:
                     hub.queues.remove(item)
 
-        from fastapi.responses import StreamingResponse
-
         return StreamingResponse(gen(), media_type="text/event-stream")
 
     @app.websocket("/sync/ws")
@@ -395,20 +508,51 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
             return
         await ws.accept()
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=64)
-        hub.queues.append((device["github_login"], queue))
+        login = device["github_login"]
+        device_id = device["id"]
+        hub.queues.append((login, queue))
+        out_task: asyncio.Task[None] | None = None
         try:
-            await ws.send_json({"type": "hello", "login": device["github_login"], "device_id": device["id"]})
+            await ws.send_json({"type": "hello", "login": login, "device_id": device_id})
+
+            async def pump_out() -> None:
+                while True:
+                    try:
+                        item = await asyncio.wait_for(queue.get(), timeout=20.0)
+                    except asyncio.TimeoutError:
+                        await ws.send_json({"type": "ping"})
+                        continue
+                    await ws.send_json(item)
+
+            out_task = asyncio.create_task(pump_out())
             while True:
                 try:
-                    item = await asyncio.wait_for(queue.get(), timeout=20.0)
-                except asyncio.TimeoutError:
-                    await ws.send_json({"type": "ping"})
+                    raw = await ws.receive_json()
+                except WebSocketDisconnect:
+                    raise
+                except Exception:
                     continue
-                await ws.send_json(item)
+                if not isinstance(raw, dict):
+                    continue
+                msg_type = raw.get("type")
+                if msg_type == "control-ready":
+                    hub.control_ready[device_id] = queue
+                elif msg_type == "terminal":
+                    _handle_terminal(hub, device, raw)
+                elif msg_type == "control-ack":
+                    continue
         except WebSocketDisconnect:
             pass
         finally:
-            item = (device["github_login"], queue)
+            if out_task is not None:
+                out_task.cancel()
+                try:
+                    await out_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            if hub.control_ready.get(device_id) is queue:
+                hub.control_ready.pop(device_id, None)
+            item = (login, queue)
             if item in hub.queues:
                 hub.queues.remove(item)
 
@@ -558,6 +702,115 @@ def _payload_with_origin(row: Any) -> dict[str, Any]:
     payload["_github_login"] = row["github_login"]
     payload["_origin_device_id"] = row["origin_device_id"]
     return payload
+
+
+def _visible_session_row(hub: Hub, login: str, session_id: str) -> Any:
+    row = hub.store.query_one(
+        "SELECT * FROM row_replica WHERE table_name = 'session' AND row_id = ?",
+        (session_id,),
+    )
+    if row is None or row["github_login"] not in hub.visible(login):
+        raise HTTPException(status_code=404, detail="unknown session")
+    return row
+
+
+def _require_dim(body: dict[str, Any], key: str) -> int:
+    value = body.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1 or value > 500:
+        raise HTTPException(status_code=400, detail=f"{key} must be an integer from 1 to 500")
+    return value
+
+
+def _optional_dim(body: dict[str, Any], key: str) -> int | None:
+    if key not in body or body[key] is None:
+        return None
+    return _require_dim(body, key)
+
+
+def _parse_control_body(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    action = body.get("action")
+    if not isinstance(action, str) or action not in CONTROL_ACTIONS:
+        raise HTTPException(status_code=400, detail="action must be one of start, stop, input, resize")
+    if action == "start":
+        payload: dict[str, Any] = {}
+        if "command" in body and body["command"] is not None:
+            command = body["command"]
+            if not isinstance(command, str) or len(command) < 1 or len(command) > 4000:
+                raise HTTPException(status_code=400, detail="command must be a string of length 1..4000")
+            payload["command"] = command
+        if "provider" in body and body["provider"] is not None:
+            provider = body["provider"]
+            if provider != "grok":
+                raise HTTPException(status_code=400, detail="provider must be grok")
+            payload["provider"] = "grok"
+        if "model" in body and body["model"] is not None:
+            model = body["model"]
+            if not isinstance(model, str) or len(model) < 1 or len(model) > 64:
+                raise HTTPException(status_code=400, detail="model must be a string of length 1..64")
+            payload["model"] = model
+        if payload.get("provider") and payload.get("command"):
+            raise HTTPException(status_code=400, detail="provider and command cannot both be set")
+        if "model" in payload and payload.get("provider") != "grok":
+            raise HTTPException(status_code=400, detail="model requires provider grok")
+        cols = _optional_dim(body, "cols")
+        rows = _optional_dim(body, "rows")
+        if cols is not None:
+            payload["cols"] = cols
+        if rows is not None:
+            payload["rows"] = rows
+        return action, payload
+    if action == "stop":
+        return action, {}
+    if action == "input":
+        data = body.get("data")
+        key = body.get("key")
+        has_data = data is not None
+        has_key = key is not None
+        if has_data == has_key:
+            raise HTTPException(status_code=400, detail="input requires exactly one of data or key")
+        if has_data:
+            if not isinstance(data, str):
+                raise HTTPException(status_code=400, detail="data must be a string")
+            byte_len = len(data.encode("utf-8"))
+            if byte_len < 1 or byte_len > 4096:
+                raise HTTPException(status_code=400, detail="data must be 1..4096 utf-8 bytes")
+            return action, {"data": data}
+        if not isinstance(key, str) or key not in CONTROL_KEYS:
+            raise HTTPException(status_code=400, detail="key must be one of enter, ctrl-c, tab")
+        return action, {"key": key}
+    cols = body.get("cols")
+    rows = body.get("rows")
+    if cols is None or rows is None:
+        raise HTTPException(status_code=400, detail="resize requires cols and rows")
+    return action, {"cols": _require_dim(body, "cols"), "rows": _require_dim(body, "rows")}
+
+
+def _handle_terminal(hub: Hub, device: dict[str, Any], raw: dict[str, Any]) -> None:
+    session_id = raw.get("session_id")
+    seq = raw.get("seq")
+    data = raw.get("data")
+    if not isinstance(session_id, str) or session_id == "":
+        return
+    if not isinstance(seq, int) or isinstance(seq, bool) or seq < 1:
+        return
+    if not isinstance(data, str):
+        return
+    row = hub.store.query_one(
+        "SELECT origin_device_id FROM row_replica WHERE table_name = 'session' AND row_id = ?",
+        (session_id,),
+    )
+    if row is None:
+        return
+    if row["origin_device_id"] != device["id"]:
+        return
+    if len(data) > TERMINAL_CHUNK_MAX:
+        data = data[:TERMINAL_CHUNK_MAX]
+    ring = hub.terminal_rings.setdefault(session_id, [])
+    ring.append({"seq": seq, "data": data})
+    if len(ring) > TERMINAL_RING_SIZE:
+        del ring[:-TERMINAL_RING_SIZE]
+    event = {"type": "terminal", "session_id": session_id, "seq": seq, "data": data}
+    hub.publish_terminal(event)
 
 
 def _accept_event(hub: Hub, device: dict[str, Any], event: dict[str, Any]) -> None:

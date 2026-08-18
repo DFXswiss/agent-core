@@ -12,12 +12,15 @@
     .bar { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-bottom: 20px; }
     button, a.btn { background: #1a1a1a; color: #fff; border: 0; border-radius: 6px; padding: 8px 14px; text-decoration: none; cursor: pointer; font-size: 0.95rem; }
     button.secondary { background: #fff; color: #1a1a1a; border: 1px solid #ccc; }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
     .kpis { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
     .kpi { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 12px 16px; min-width: 140px; }
     .kpi b { display: block; font-size: 1.6rem; }
     table { width: 100%; border-collapse: collapse; background: #fff; margin-bottom: 24px; }
     th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #eee; font-size: 0.92rem; }
     th { background: #efeae0; }
+    tr.session-row { cursor: pointer; }
+    tr.session-row:hover { background: #f8f4ec; }
     .working, .implementing { color: #0b5; font-weight: 600; }
     .reviewing, .pr-review { color: #c60; font-weight: 600; }
     .failed { color: #c00; font-weight: 600; }
@@ -25,6 +28,14 @@
     .hidden { display: none; }
     input, select, textarea { padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px; font: inherit; }
     label { display: block; margin: 8px 0; }
+    #term {
+      background: #1a1a1a; color: #e8e6e1; padding: 12px; border-radius: 8px;
+      min-height: 200px; max-height: 400px; overflow: auto; white-space: pre-wrap;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem;
+    }
+    #session-controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 12px 0; }
+    #session-meta { color: #444; font-size: 0.92rem; }
+    #device-offline { color: #c60; font-weight: 600; margin: 0; }
   </style>
 </head>
 <body>
@@ -51,6 +62,26 @@
       <div class="kpi"><span>Open tasks</span><b id="k-tasks">–</b></div>
       <div class="kpi"><span>Working agents</span><b id="k-agents">–</b></div>
       <div class="kpi"><span>Open pings</span><b id="k-pings">–</b></div>
+    </div>
+    <h2>Sessions</h2>
+    <table id="sessions"><thead><tr><th>Owner</th><th>Id</th><th>Kind</th><th>Status</th><th>Host</th><th>Last seen</th><th>Control</th></tr></thead><tbody></tbody></table>
+    <div id="session-detail" class="hidden">
+      <div class="bar">
+        <h2 style="margin:0">Session</h2>
+        <button type="button" class="secondary" id="session-close">Close</button>
+      </div>
+      <p id="session-meta"></p>
+      <pre id="term"></pre>
+      <p id="session-watch-msg" class="hidden">Watching — this session is on another device.</p>
+      <p id="device-offline" class="hidden">device offline</p>
+      <div id="session-controls" class="hidden">
+        <button type="button" id="ctrl-start">Start</button>
+        <button type="button" id="ctrl-start-grok">Start Grok</button>
+        <button type="button" id="ctrl-stop">Stop</button>
+        <input id="ctrl-input" type="text" placeholder="type input" autocomplete="off">
+        <button type="button" id="ctrl-send">Send</button>
+        <button type="button" id="ctrl-c">Ctrl-C</button>
+      </div>
     </div>
     <h2>Send a ping</h2>
     <form id="ping-form">
@@ -84,6 +115,10 @@
       document.getElementById("signin").href = "/auth/github?next=" + encodeURIComponent("/pair?challenge=" + challenge);
     }
 
+    let openSessionId = null;
+    let termEs = null;
+    let openCanControl = false;
+
     async function me() {
       const res = await fetch("/auth/me");
       if (res.status === 401) return null;
@@ -110,6 +145,120 @@
       }).join("") + "</tr>").join("") || "<tr><td colspan='" + cols.length + "'>—</td></tr>";
     }
 
+    function fillSessions(sessions) {
+      const tb = document.querySelector("#sessions tbody");
+      const rows = sessions || [];
+      tb.innerHTML = rows.map(s => {
+        const ctrl = s.can_control ? "control" : "watch";
+        const status = s.status ?? "";
+        return `<tr class="session-row" data-session-id="${esc(s.id)}">
+          <td>${esc(s._github_login)}</td>
+          <td>${esc(s.id)}</td>
+          <td>${esc(s.kind)}</td>
+          <td class="${esc(status)}">${esc(status)}</td>
+          <td>${esc(s.host)}</td>
+          <td>${esc(s.last_seen_at ?? s.last_seen)}</td>
+          <td>${ctrl}</td>
+        </tr>`;
+      }).join("") || "<tr><td colspan='7'>—</td></tr>";
+    }
+
+    function setControlEnabled(online) {
+      document.getElementById("device-offline").classList.toggle("hidden", online);
+      ["ctrl-start", "ctrl-start-grok", "ctrl-stop", "ctrl-send", "ctrl-c", "ctrl-input"].forEach(id => {
+        document.getElementById(id).disabled = !online;
+      });
+    }
+
+    function closeSessionDetail() {
+      openSessionId = null;
+      openCanControl = false;
+      document.getElementById("session-detail").classList.add("hidden");
+      if (termEs) {
+        termEs.close();
+        termEs = null;
+      }
+      document.getElementById("term").textContent = "";
+    }
+
+    function appendTermChunk(data) {
+      try {
+        document.getElementById("term").textContent += atob(data);
+      } catch (e) { /* skip undecodable chunk */ }
+    }
+
+    async function openSession(id) {
+      if (termEs) {
+        termEs.close();
+        termEs = null;
+      }
+      openSessionId = id;
+      document.getElementById("term").textContent = "";
+      const res = await fetch("/api/sessions/" + encodeURIComponent(id));
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const s = await res.json();
+      document.getElementById("session-detail").classList.remove("hidden");
+      const p = s.payload || {};
+      document.getElementById("session-meta").textContent =
+        "id=" + s.id +
+        " owner=" + (s._github_login || "") +
+        " host=" + (p.host || "") +
+        " status=" + (p.status || "") +
+        " control_connected=" + s.control_connected;
+      openCanControl = !!s.can_control;
+      document.getElementById("session-watch-msg").classList.toggle("hidden", openCanControl);
+      document.getElementById("session-controls").classList.toggle("hidden", !openCanControl);
+      if (openCanControl) {
+        setControlEnabled(!!s.control_connected);
+      } else {
+        document.getElementById("device-offline").classList.add("hidden");
+      }
+      termEs = new EventSource("/api/sessions/" + encodeURIComponent(id) + "/terminal");
+      termEs.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data);
+          if (msg.type === "terminal" && typeof msg.data === "string") {
+            appendTermChunk(msg.data);
+          }
+        } catch (e) { /* ignore bad SSE payloads */ }
+      };
+    }
+
+    function updateOpenSessionFromState(sessions) {
+      if (!openSessionId) return;
+      const s = (sessions || []).find(x => x.id === openSessionId);
+      if (!s) return;
+      document.getElementById("session-meta").textContent =
+        "id=" + s.id +
+        " owner=" + (s._github_login || "") +
+        " host=" + (s.host || "") +
+        " status=" + (s.status || "") +
+        " control_connected=" + s.control_connected;
+      openCanControl = !!s.can_control;
+      document.getElementById("session-watch-msg").classList.toggle("hidden", openCanControl);
+      document.getElementById("session-controls").classList.toggle("hidden", !openCanControl);
+      if (openCanControl) setControlEnabled(!!s.control_connected);
+    }
+
+    async function postControl(body) {
+      if (!openSessionId) return;
+      const res = await fetch("/api/sessions/" + encodeURIComponent(openSessionId) + "/control", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        let detail = "HTTP " + res.status;
+        try {
+          const j = await res.json();
+          if (j.detail) detail = j.detail;
+        } catch (e) { /* keep status text */ }
+        const err = document.getElementById("err");
+        err.hidden = false;
+        err.textContent = detail;
+      }
+    }
+
     async function render() {
       const err = document.getElementById("err");
       try {
@@ -131,6 +280,8 @@
         document.getElementById("k-tasks").textContent = tasks.length;
         document.getElementById("k-agents").textContent = working.length;
         document.getElementById("k-pings").textContent = pings.length;
+        fillSessions(data.session || []);
+        updateOpenSessionFromState(data.session || []);
         fill("tasks", data.task || [], ["_github_login", "title", "state", "current_round", "workflow"]);
         fill("pings", data.pings || [], ["from_login", "to_login", "kind", "task_id", "acked_at", "_ack"]);
         fill("devices", (data.devices || []).filter(d => !d.revoked_at), ["github_login", "name", "id", "created_at"]);
@@ -173,11 +324,34 @@
       ev.target.reset();
       render();
     };
+    document.getElementById("session-close").onclick = () => closeSessionDetail();
+    document.getElementById("ctrl-start").onclick = () => postControl({ action: "start" });
+    document.getElementById("ctrl-start-grok").onclick = () => postControl({ action: "start", provider: "grok" });
+    document.getElementById("ctrl-stop").onclick = () => postControl({ action: "stop" });
+    document.getElementById("ctrl-send").onclick = () => {
+      const data = document.getElementById("ctrl-input").value;
+      if (!data) return;
+      postControl({ action: "input", data });
+    };
+    document.getElementById("ctrl-c").onclick = () => postControl({ action: "input", key: "ctrl-c" });
     document.addEventListener("click", async (ev) => {
-      const id = ev.target && ev.target.getAttribute && ev.target.getAttribute("data-ack");
-      if (!id) return;
-      await fetch("/api/pings/" + id + "/ack", { method: "POST" });
-      render();
+      const t = ev.target;
+      if (!t || !t.getAttribute) return;
+      const ack = t.getAttribute("data-ack");
+      if (ack) {
+        await fetch("/api/pings/" + ack + "/ack", { method: "POST" });
+        render();
+        return;
+      }
+      const row = t.closest && t.closest("tr.session-row");
+      if (row && row.getAttribute("data-session-id")) {
+        try {
+          await openSession(row.getAttribute("data-session-id"));
+        } catch (e) {
+          document.getElementById("err").hidden = false;
+          document.getElementById("err").textContent = String(e);
+        }
+      }
     });
     render();
     setInterval(render, 2000);
