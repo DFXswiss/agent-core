@@ -473,7 +473,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         return {"id": ping_id}
 
     @app.post("/api/pings/{ping_id}/ack")
-    def api_ping_ack(request: Request, ping_id: str) -> dict[str, Any]:
+    async def api_ping_ack(request: Request, ping_id: str) -> dict[str, Any]:
         login = _any_login(hub, request)
         row = hub.store.query_one(
             "SELECT * FROM row_replica WHERE table_name = 'ping' AND row_id = ?",
@@ -485,7 +485,17 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         if payload.get("to_login") != login:
             raise HTTPException(status_code=403, detail="only the recipient can ack")
         payload["acked_at"] = utcnow()
-        _record_web_event(hub, login, "ping", "update", ping_id, payload, keep_origin=row["origin_device_id"])
+        _record_web_event(hub, login, "ping", "update", ping_id, payload)
+        owner = row["github_login"]
+        await hub.publish(
+            {
+                "type": "ping",
+                "from": payload.get("from_login"),
+                "to": login,
+                "id": ping_id,
+                "login": owner,
+            }
+        )
         return {"id": ping_id, "acked_at": payload["acked_at"], "payload": payload}
 
     @app.get("/api/stream")
@@ -670,9 +680,8 @@ def _record_web_event(
     op: str,
     row_id: str,
     payload: dict[str, Any],
-    keep_origin: str | None = None,
 ) -> None:
-    origin = keep_origin if keep_origin not in (None, "") else f"web:{login}"
+    origin = f"web:{login}"
     last = hub.store.query_one(
         "SELECT COALESCE(MAX(origin_seq), 0) AS m FROM ledger_event WHERE origin_device_id = ?",
         (origin,),
