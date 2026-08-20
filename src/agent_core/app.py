@@ -22,6 +22,7 @@ STATIC = Path(__file__).resolve().parent / "static"
 ALLOWED_TABLES = frozenset(
     {
         "session",
+        "activity",
         "task",
         "task_round",
         "agent",
@@ -278,29 +279,45 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         if not isinstance(events, list):
             raise HTTPException(status_code=400, detail="events must be a list")
         accepted = 0
+        notify_to: set[str] = set()
         for event in events:
             if not isinstance(event, dict):
                 raise HTTPException(status_code=400, detail="event must be an object")
-            _accept_event(hub, device, event)
+            notify_to.update(_accept_event(hub, device, event))
             accepted += 1
         if accepted:
             await hub.publish({"type": "events", "login": device["github_login"], "count": accepted})
+            for target in notify_to:
+                await hub.publish(
+                    {
+                        "type": "events",
+                        "login": device["github_login"],
+                        "to": target,
+                        "count": accepted,
+                    }
+                )
         return {"accepted": accepted}
 
     @app.get("/sync/pull")
     def sync_pull(request: Request) -> dict[str, Any]:
         device = hub.device_for_token(bearer(request))
-        return {"events": _visible_events(hub, device["github_login"], _cursors(request))}
+        cursors = _cursors(request)
+        return {
+            "events": _own_events(hub, device["id"], cursors),
+            "inbox": _inbox_snapshots(hub, device["id"]),
+            "pings": _ping_snapshots(hub, device["github_login"]),
+        }
 
     @app.get("/sync/restore")
     def sync_restore(request: Request) -> dict[str, Any]:
         device = hub.device_for_token(bearer(request))
-        events = _visible_events(hub, device["github_login"], {})
+        own = _own_events(hub, device["id"], {})
         return {
             "device_id": device["id"],
             "login": device["github_login"],
-            "events": events,
-            "own_events": [e for e in events if e["origin_device_id"] == device["id"]],
+            "own_events": own,
+            "inbox": _inbox_snapshots(hub, device["id"]),
+            "pings": _ping_snapshots(hub, device["github_login"]),
         }
 
     @app.get("/api/state")
@@ -309,6 +326,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         allowed = hub.visible(login)
         tables = {
             "session": "session",
+            "activity": "activity",
             "task": "task",
             "task_round": "task_round",
             "agent": "agent",
@@ -578,26 +596,71 @@ def _cursors(request: Request) -> dict[str, int]:
     return out
 
 
-def _visible_events(hub: Hub, login: str, cursors: dict[str, int]) -> list[dict[str, Any]]:
-    allowed = hub.visible(login)
-    origins = {row["id"] for row in hub.store.query("SELECT id FROM device WHERE github_login IN ({})".format(_placeholders(allowed)), tuple(sorted(allowed)))}
-    origins.update(
-        row["origin_device_id"]
-        for row in hub.store.query(
-            "SELECT DISTINCT origin_device_id FROM row_replica WHERE github_login IN ({})".format(_placeholders(allowed)),
-            tuple(sorted(allowed)),
-        )
+def _own_events(hub: Hub, device_id: str, cursors: dict[str, int]) -> list[dict[str, Any]]:
+    after = cursors.get(device_id, 0)
+    rows = hub.store.query(
+        "SELECT e.* FROM ledger_event e WHERE e.origin_device_id = ? AND e.origin_seq > ? ORDER BY e.origin_seq ASC",
+        (device_id, after),
     )
-    events: list[dict[str, Any]] = []
-    for origin in sorted(origins):
-        after = cursors.get(origin, 0)
-        rows = hub.store.query(
-            "SELECT e.* FROM ledger_event e WHERE e.origin_device_id = ? AND e.origin_seq > ? ORDER BY e.origin_seq ASC",
-            (origin, after),
+    return [_event_out(r) for r in rows]
+
+
+def _owned_session_ids(hub: Hub, device_id: str) -> set[str]:
+    rows = hub.store.query(
+        "SELECT row_id FROM row_replica WHERE table_name = 'session' AND origin_device_id = ?",
+        (device_id,),
+    )
+    return {row["row_id"] for row in rows}
+
+
+def _message_to_session(payload: dict[str, Any]) -> str | None:
+    if payload.get("type") != "message":
+        return None
+    inner = payload.get("payload")
+    if not isinstance(inner, dict):
+        return None
+    target = inner.get("to_session")
+    if not isinstance(target, str) or target == "":
+        return None
+    return target
+
+
+def _inbox_snapshots(hub: Hub, device_id: str) -> list[dict[str, Any]]:
+    owned = _owned_session_ids(hub, device_id)
+    if not owned:
+        return []
+    out: list[dict[str, Any]] = []
+    parent_ids: set[str] = set()
+    for row in hub.store.query("SELECT * FROM row_replica WHERE table_name = 'activity'"):
+        payload = loads(row["payload"])
+        if not isinstance(payload, dict):
+            continue
+        to_session = _message_to_session(payload)
+        if to_session is None or to_session not in owned:
+            continue
+        out.append(_replica_out(row))
+        parent_id = payload.get("session_id")
+        if isinstance(parent_id, str) and parent_id != "":
+            parent_ids.add(parent_id)
+    for parent_id in sorted(parent_ids):
+        parent = hub.store.query_one(
+            "SELECT * FROM row_replica WHERE table_name = 'session' AND row_id = ?",
+            (parent_id,),
         )
-        events.extend(_event_out(r) for r in rows)
-    events.sort(key=lambda e: (e["origin_device_id"], e["origin_seq"]))
-    return events
+        if parent is not None:
+            out.append(_replica_out(parent))
+    return out
+
+
+def _ping_snapshots(hub: Hub, login: str) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for row in hub.store.query("SELECT * FROM row_replica WHERE table_name = 'ping'"):
+        payload = loads(row["payload"])
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("from_login") == login or payload.get("to_login") == login:
+            out.append(_replica_out(row))
+    return out
 
 
 def _record_web_event(
@@ -813,7 +876,43 @@ def _handle_terminal(hub: Hub, device: dict[str, Any], raw: dict[str, Any]) -> N
     hub.publish_terminal(event)
 
 
-def _accept_event(hub: Hub, device: dict[str, Any], event: dict[str, Any]) -> None:
+def _session_mail_notify(hub: Hub, device: dict[str, Any], table: str, op: str, payload: dict[str, Any]) -> list[str]:
+    if table != "activity" or op != "insert":
+        return []
+    to_session = _message_to_session(payload)
+    if to_session is None:
+        if payload.get("type") == "message":
+            raise HTTPException(status_code=400, detail="message activity requires payload.to_session")
+        return []
+    target = hub.store.query_one(
+        "SELECT github_login FROM row_replica WHERE table_name = 'session' AND row_id = ?",
+        (to_session,),
+    )
+    if target is None:
+        raise HTTPException(status_code=404, detail="unknown session")
+    owner = target["github_login"]
+    if owner not in hub.visible(device["github_login"]):
+        raise HTTPException(status_code=403, detail="target session is outside your teams")
+    return [owner]
+
+
+def _reject_open_session_collision(hub: Hub, origin: str, table: str, op: str, row_id: str) -> None:
+    if table != "session" or op != "insert":
+        return
+    replica = hub.store.query_one(
+        "SELECT origin_device_id, payload FROM row_replica WHERE table_name = 'session' AND row_id = ?",
+        (row_id,),
+    )
+    if replica is None:
+        return
+    previous = loads(replica["payload"])
+    status = previous.get("status") if isinstance(previous, dict) else None
+    if status == "closed":
+        return
+    raise HTTPException(status_code=409, detail="session id is already open")
+
+
+def _accept_event(hub: Hub, device: dict[str, Any], event: dict[str, Any]) -> list[str]:
     origin = event.get("origin_device_id")
     if origin != device["id"]:
         raise HTTPException(status_code=403, detail="cannot push events for another device")
@@ -835,6 +934,8 @@ def _accept_event(hub: Hub, device: dict[str, Any], event: dict[str, Any]) -> No
         raise HTTPException(status_code=400, detail="payload must be an object")
     if not isinstance(occurred, str) or occurred == "":
         raise HTTPException(status_code=400, detail="occurred_at is required")
+    notify = _session_mail_notify(hub, device, table, op, payload)
+    _reject_open_session_collision(hub, origin, table, op, row_id)
     existing = hub.store.query_one(
         "SELECT * FROM ledger_event WHERE origin_device_id = ? AND origin_seq = ?",
         (origin, seq),
@@ -849,7 +950,7 @@ def _accept_event(hub: Hub, device: dict[str, Any], event: dict[str, Any]) -> No
             or existing["occurred_at"] != occurred
         ):
             raise HTTPException(status_code=409, detail=f"origin_seq {seq} already exists with different content")
-        return
+        return []
     last = hub.store.query_one(
         "SELECT COALESCE(MAX(origin_seq), 0) AS m FROM ledger_event WHERE origin_device_id = ?",
         (origin,),
@@ -878,13 +979,13 @@ def _accept_event(hub: Hub, device: dict[str, Any], event: dict[str, Any]) -> No
             "DELETE FROM row_replica WHERE table_name = ? AND row_id = ?",
             (table, row_id),
         )
-        return
+        return []
     if ping_ack:
         hub.store.execute(
             "UPDATE row_replica SET payload = ?, updated_at = ? WHERE table_name = ? AND row_id = ?",
             (encoded, utcnow(), table, row_id),
         )
-        return
+        return []
     hub.store.execute(
         "INSERT INTO row_replica (table_name, row_id, origin_device_id, github_login, payload, updated_at) "
         "VALUES (?, ?, ?, ?, ?, ?) "
@@ -892,3 +993,4 @@ def _accept_event(hub: Hub, device: dict[str, Any], event: dict[str, Any]) -> No
         "github_login = excluded.github_login, payload = excluded.payload, updated_at = excluded.updated_at",
         (table, row_id, write_origin, device["github_login"], encoded, utcnow()),
     )
+    return notify

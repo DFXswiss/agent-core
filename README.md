@@ -1,6 +1,6 @@
 # agent-core
 
-Hub for the [agent](https://github.com/DFXswiss/agent) ledger.
+Hub for the [agent](https://github.com/DFXswiss/agent) session store.
 
 Anyone can sign in with GitHub. Each person sees their own work. People listed on a team in `teams.yaml` also see that team. Add or remove members with a pull request.
 
@@ -53,7 +53,7 @@ See [PROTOCOL.md](PROTOCOL.md).
 
 ## Control
 
-Anyone who can see a ledger session may watch its live terminal on the website. Start, stop, type, and resize are allowed only when the signed-in person owns the session's origin device and that device has a control-ready WebSocket. The hub relays control and terminal bytes; it does not run processes and does not author session rows. Details are in [PROTOCOL.md](PROTOCOL.md).
+Anyone who can see a session may watch its live terminal on the website. Start, stop, type, and resize are allowed only when the signed-in person owns the session's origin device and that device has a control-ready WebSocket. The hub relays control and terminal bytes; it does not run processes and does not author session rows. Details are in [PROTOCOL.md](PROTOCOL.md).
 
 ## Tests
 

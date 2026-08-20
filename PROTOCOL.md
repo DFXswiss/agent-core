@@ -6,7 +6,7 @@ This document is the contract between the `agent` client and this hub.
 
 Anyone may sign in with GitHub. Authorization is not the login; it is team membership.
 
-- A user always reads and writes their own ledger.
+- A user always reads and writes their own store.
 - A user listed on a team in `teams.yaml` also reads every member of that team.
 - Membership changes only through a pull request to `teams.yaml`.
 
@@ -44,18 +44,58 @@ Rules:
 - `origin_seq` is per device, starts at 1, and must be `last + 1` (otherwise 409).
 - Repeating the exact same event is idempotent.
 - Repeating a seq with different content is 409.
-- Allowed tables: `session`, `task`, `task_round`, `agent`, `checklist_item`, `local_check`, `review_gate`, `open_work`, `ping`.
+- Allowed tables: `session`, `activity`, `task`, `task_round`, `agent`, `checklist_item`, `local_check`, `review_gate`, `open_work`, `ping`.
 - Allowed ops: `insert`, `update`, `delete`.
+- Open session ids are unique. A colliding `session` insert for an id that is already open is 409.
+- Foreign `origin_device_id` on push is 403. A push must not steal a replica row owned by another device (same `table`+`row_id`).
 
-`GET /sync/pull?cursor=<origin_id>:<last_seq>&cursor=...` returns later events for every visible origin. An origin without a cursor starts at 0, so a new teammate is fully backfilled.
+### Session mail
 
-`GET /sync/restore` returns every visible event (`events`) and the caller's own subset (`own_events`). A wiped laptop replays `events` in origin sequence order.
+An `activity` insert with `payload.type=message` must set `payload.payload.to_session` to the recipient **session id**. The hub resolves that id against the replica.
 
-`GET /sync/ws?token=...` pushes `{type: events|ping|hello|ping}` when new data arrives. The same socket also accepts inbound control messages (see Control). Clients that never send `control-ready` keep working as before.
+- Missing target session → 404.
+- Sender is not allowed to see the owning login of that session → 403.
+- Open session ids are unique; the hub uses that uniqueness to route the snapshot.
+
+Website-created person pings use synthetic origin `web:<login>`. Ack does not transfer ownership of the ping row.
+
+### Pull and restore
+
+Devices do **not** default-pull every visible origin. The website still reads the full visibility-filtered replica (`GET /api/state`, `GET /api/stream`).
+
+`GET /sync/pull?cursor=<origin_id>:<last_seq>&cursor=...`:
+
+```json
+{
+  "events": [],
+  "inbox": [],
+  "pings": []
+}
+```
+
+- `events` — this device's own events after the cursor for **this** origin, gapless. Other origins are omitted.
+- `inbox` — row snapshots: each `activity` with `type=message` whose `payload.to_session` this device owns, plus the parent `session` snapshot for that activity's `session_id`.
+- `pings` — person-ping row snapshots this login **sent or received** (not every team-visible ping).
+
+`GET /sync/restore` returns:
+
+```json
+{
+  "device_id": "<uuid>",
+  "login": "<github-login>",
+  "own_events": [],
+  "inbox": [],
+  "pings": []
+}
+```
+
+A wiped laptop replays `own_events` in `origin_seq` order, then applies `inbox` and `pings` as row snapshots (not a holey event stream).
+
+`GET /sync/ws?token=...` pushes `{type: events|ping|hello}` when new data arrives, including session-mail for the recipient login. The same socket also accepts inbound control messages (see Control). Clients that never send `control-ready` keep working as before.
 
 ## Control
 
-The hub is a relay only. It does not run tmux, does not start processes, and does not author session ledger rows. Devices publish session rows through the normal push path. Control and terminal bytes ride on top of that.
+The hub is a relay only. It does not run tmux, does not start processes, and does not author session rows. Devices publish session rows through the normal push path. Control and terminal bytes ride on top of that.
 
 ### Ownership and visibility
 
@@ -98,7 +138,7 @@ Body (one of):
 
 Validation (400): `action` required and one of those four; `command` if present is a string of length 1..4000; `provider` if present is exactly `grok`; `model` if present is a string of length 1..64 and requires `provider=grok`; `provider` and `command` cannot both be set; `data` if present is a string with utf-8 byte length 1..4096; `key` if present is exactly `enter`|`ctrl-c`|`tab`; input must have exactly one of `data` or `key`; `cols`/`rows` if present are integers 1..500; resize requires both; unknown extra keys are ignored.
 
-`provider=grok` is launch metadata for the owning device. The hub does not run `grok`. The device mints a UUID for Grok `--session-id` (it never forwards the ledger session id) and later uses `--resume` with `runtime.grok_session_id`. An empty model becomes `grok-4.6` on the device.
+`provider=grok` is launch metadata for the owning device. The hub does not run `grok`. The device mints a UUID for Grok `--session-id` (it never forwards the store session id) and later uses `--resume` with `runtime.grok_session_id`. An empty model becomes `grok-4.6` on the device.
 
 Authz:
 
@@ -108,7 +148,7 @@ Authz:
 - 409 with detail `owning device is not control-connected` if the origin device has no live control-ready socket
 - 202 `{ "queued": true }` after the hub has queued the control frame on **that** origin device's socket (`device.id == origin_device_id`, never another laptop of the same login)
 
-The hub does **not** call ledger write helpers and does not insert a `session` (or any) ledger event for control.
+The hub does **not** call store write helpers and does not insert a `session` (or any) store event for control.
 
 Forwarded WebSocket frame to the device:
 
@@ -150,7 +190,7 @@ On `terminal`:
 - Append to an in-memory ring: last 64 chunks per `session_id`, drop oldest; each `data` string max 8192 chars (truncate longer).
 - Fan out `{ "type": "terminal", "session_id", "seq", "data" }` to browser terminal subscribers for that session.
 
-Terminal bytes are **ephemeral** and **team-visible** (same visibility class as evidence). They are **not** ledger events. Restore does **not** replay them. They are never written to SQLite.
+Terminal bytes are **ephemeral** and **team-visible** (same visibility class as evidence). They are **not** store events. Restore does **not** replay them. They are never written to SQLite.
 
 ### Terminal stream
 
