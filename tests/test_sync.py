@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
+from agent_core.db import loads
 from tests.conftest import pair_device, sign_in
 
 
@@ -167,6 +168,10 @@ def test_ping_ack_uses_web_origin_not_device_seq(hub: TestClient) -> None:
     sign_in(hub, "code-bob")
     import asyncio
 
+    before_web = hub.app.state.hub.store.query_one(
+        "SELECT COALESCE(MAX(origin_seq), 0) AS m FROM ledger_event WHERE origin_device_id = ?",
+        ("web:bob",),
+    )
     seen: asyncio.Queue[dict] = asyncio.Queue(maxsize=8)
     hub.app.state.hub.queues.append(("alice", seen))
     try:
@@ -183,15 +188,19 @@ def test_ping_ack_uses_web_origin_not_device_seq(hub: TestClient) -> None:
     assert fanout["to"] == "bob"
     assert fanout["login"] == "alice"
     replica = hub.app.state.hub.store.query_one(
-        "SELECT origin_device_id FROM row_replica WHERE table_name = 'ping' AND row_id = ?",
+        "SELECT origin_device_id, payload FROM row_replica WHERE table_name = 'ping' AND row_id = ?",
         ("ping-device",),
     )
     assert replica["origin_device_id"] == alice_dev
+    replica_payload = loads(replica["payload"])
+    assert replica_payload["acked_at"] == ack.json()["acked_at"]
     ack_event = hub.app.state.hub.store.query_one(
-        "SELECT origin_device_id, origin_seq FROM ledger_event WHERE table_name = 'ping' AND op = 'update' AND row_id = ?",
+        "SELECT origin_device_id, origin_seq, payload FROM ledger_event WHERE table_name = 'ping' AND op = 'update' AND row_id = ?",
         ("ping-device",),
     )
     assert ack_event["origin_device_id"] == "web:bob"
+    assert ack_event["origin_seq"] == int(before_web["m"]) + 1
+    assert loads(ack_event["payload"])["acked_at"] == ack.json()["acked_at"]
     again = event(alice_dev, 3, row_id="task-after-ack", title="after")
     pushed = hub.post("/sync/push", headers={"Authorization": f"Bearer {alice}"}, json={"events": [again]})
     assert pushed.status_code == 200, pushed.text
