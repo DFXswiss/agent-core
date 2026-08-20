@@ -920,8 +920,10 @@ def _validate_ping(hub: Hub, device: dict[str, Any], table: str, op: str, payloa
         if target.lower() not in hub.visible(login):
             raise HTTPException(status_code=403, detail="target is outside your teams")
         return
-    if op != "update" or replica is None:
+    if op != "update":
         return
+    if replica is None:
+        raise HTTPException(status_code=404, detail="unknown ping")
     previous = loads(replica["payload"])
     if not isinstance(previous, dict):
         return
