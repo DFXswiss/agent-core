@@ -1003,15 +1003,15 @@ def _accept_event(hub: Hub, device: dict[str, Any], event: dict[str, Any]) -> li
     )
     _validate_ping(hub, device, table, op, payload, replica)
     ping_ack = False
+    if table == "session" and op == "update" and replica is None:
+        raise HTTPException(status_code=404, detail="unknown session")
     if table == "ping" and op == "update" and replica is not None:
         previous = loads(replica["payload"])
         ping_ack = previous.get("to_login") == device["github_login"] and previous.get("id") == payload.get("id")
         if ping_ack and isinstance(previous, dict):
-            for key, value in payload.items():
-                if key == "acked_at":
-                    continue
-                if previous.get(key) != value:
-                    raise HTTPException(status_code=403, detail="ack cannot rewrite ping fields")
+            previous["acked_at"] = payload.get("acked_at")
+            payload = previous
+            encoded = dumps(payload)
     if replica is not None and replica["origin_device_id"] != origin and not ping_ack:
         raise HTTPException(status_code=403, detail="row belongs to another device")
     write_origin = replica["origin_device_id"] if ping_ack and replica is not None else origin
