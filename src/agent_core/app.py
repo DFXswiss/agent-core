@@ -877,7 +877,7 @@ def _handle_terminal(hub: Hub, device: dict[str, Any], raw: dict[str, Any]) -> N
 
 
 def _session_mail_notify(hub: Hub, device: dict[str, Any], table: str, op: str, payload: dict[str, Any]) -> list[str]:
-    if table != "activity" or op != "insert":
+    if table != "activity" or op not in ("insert", "update"):
         return []
     to_session = _message_to_session(payload)
     if to_session is None:

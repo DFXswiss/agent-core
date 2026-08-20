@@ -276,6 +276,47 @@ def test_session_mail_inbox_and_visibility(hub: TestClient) -> None:
     assert alice_pull["inbox"] == []
 
 
+def test_session_mail_update_cannot_bypass_visibility(hub: TestClient) -> None:
+    dave_dev = "dddddddd-dddd-dddd-dddd-dddddddddd14"
+    alice_dev = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaa14"
+    alice = pair_device(hub, "code-alice", alice_dev)
+    dave = pair_device(hub, "code-dave", dave_dev)
+    assert (
+        hub.post(
+            "/sync/push",
+            headers={"Authorization": f"Bearer {alice}"},
+            json={"events": [_session_event(alice_dev, 1, "sess-a14")]},
+        ).status_code
+        == 200
+    )
+    note = {
+        "id": "note-1",
+        "session_id": "sess-d14",
+        "type": "investigate.step",
+        "payload": {"text": "local"},
+    }
+    assert (
+        hub.post(
+            "/sync/push",
+            headers={"Authorization": f"Bearer {dave}"},
+            json={"events": [_activity_event(dave_dev, 1, "note-1", note)]},
+        ).status_code
+        == 200
+    )
+    note["type"] = "message"
+    note["payload"] = {"to_session": "sess-a14", "body": "sneak"}
+    sneak_event = _activity_event(dave_dev, 2, "note-1", note)
+    sneak_event["op"] = "update"
+    sneak = hub.post(
+        "/sync/push",
+        headers={"Authorization": f"Bearer {dave}"},
+        json={"events": [sneak_event]},
+    )
+    assert sneak.status_code == 403
+    alice_pull = hub.get("/sync/pull", headers={"Authorization": f"Bearer {alice}"}).json()
+    assert all(row.get("row_id") != "note-1" for row in alice_pull["inbox"])
+
+
 def test_restore_pings_are_sent_or_received_only(hub: TestClient) -> None:
     alice_dev = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaa12"
     bob_dev = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbb12"
