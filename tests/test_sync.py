@@ -365,6 +365,12 @@ def test_device_cannot_spoof_ping_from_login(hub: TestClient) -> None:
     }
     r = hub.post("/sync/push", headers={"Authorization": f"Bearer {dave}"}, json={"events": [spoof]})
     assert r.status_code == 403
+    mixed = dict(spoof)
+    mixed["payload"] = dict(spoof["payload"])
+    mixed["payload"]["from_login"] = "dave"
+    mixed["payload"]["to_login"] = "Dave"
+    case = hub.post("/sync/push", headers={"Authorization": f"Bearer {dave}"}, json={"events": [mixed]})
+    assert case.status_code == 400
     missing = dict(spoof)
     missing["op"] = "update"
     missing["payload"] = dict(spoof["payload"])

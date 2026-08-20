@@ -917,7 +917,9 @@ def _validate_ping(hub: Hub, device: dict[str, Any], table: str, op: str, payloa
         target = payload.get("to_login")
         if not isinstance(target, str) or target == "":
             raise HTTPException(status_code=400, detail="to_login is required")
-        if target.lower() not in hub.visible(login):
+        if target != target.lower():
+            raise HTTPException(status_code=400, detail="to_login must be lowercase")
+        if target not in hub.visible(login):
             raise HTTPException(status_code=403, detail="target is outside your teams")
         return
     if op != "update":
