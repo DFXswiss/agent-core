@@ -221,7 +221,9 @@ def test_second_device_does_not_receive_control(hub: TestClient) -> None:
         ws_b.receive_json()
         ws_b.send_json({"type": "control-ready"})
         # B is control-ready, but origin is A — still not control-connected for this session.
+        # HTTP GET pumps the TestClient websocket receive loop.
         for _ in range(50):
+            hub.get(f"/api/sessions/{sid}")
             if hub.app.state.hub.control_ready.get(alice_b) is not None:
                 break
         assert hub.app.state.hub.control_ready.get(alice_b) is not None
