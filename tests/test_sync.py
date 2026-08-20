@@ -169,11 +169,20 @@ def test_open_session_id_is_unique(hub: TestClient) -> None:
     bob_dev = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbb10"
     alice = pair_device(hub, "code-alice", alice_dev)
     bob = pair_device(hub, "code-bob", bob_dev)
+    first = _session_event(alice_dev, 1, "shared-session")
     assert (
         hub.post(
             "/sync/push",
             headers={"Authorization": f"Bearer {alice}"},
-            json={"events": [_session_event(alice_dev, 1, "shared-session")]},
+            json={"events": [first]},
+        ).status_code
+        == 200
+    )
+    assert (
+        hub.post(
+            "/sync/push",
+            headers={"Authorization": f"Bearer {alice}"},
+            json={"events": [first]},
         ).status_code
         == 200
     )
@@ -334,3 +343,25 @@ def test_restore_pings_are_sent_or_received_only(hub: TestClient) -> None:
     assert ping_id in alice_ids
     assert ping_id in bob_ids
     assert ping_id not in dave_ids
+
+
+def test_device_cannot_spoof_ping_from_login(hub: TestClient) -> None:
+    dave_dev = "dddddddd-dddd-dddd-dddd-dddddddddd15"
+    dave = pair_device(hub, "code-dave", dave_dev)
+    spoof = {
+        "origin_device_id": dave_dev,
+        "origin_seq": 1,
+        "table": "ping",
+        "op": "insert",
+        "row_id": "ping-spoof",
+        "payload": {
+            "id": "ping-spoof",
+            "from_login": "alice",
+            "to_login": "bob",
+            "kind": "ping",
+            "body": "nope",
+        },
+        "occurred_at": "2026-08-13T12:00:00Z",
+    }
+    r = hub.post("/sync/push", headers={"Authorization": f"Bearer {dave}"}, json={"events": [spoof]})
+    assert r.status_code == 403

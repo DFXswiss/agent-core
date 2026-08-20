@@ -641,13 +641,13 @@ def _inbox_snapshots(hub: Hub, device_id: str) -> list[dict[str, Any]]:
         out.append(_replica_out(row))
         parent_id = payload.get("session_id")
         if isinstance(parent_id, str) and parent_id != "":
-            parent_ids.add(parent_id)
-    for parent_id in sorted(parent_ids):
+            parent_ids.add((parent_id, row["origin_device_id"]))
+    for parent_id, origin in sorted(parent_ids):
         parent = hub.store.query_one(
             "SELECT * FROM row_replica WHERE table_name = 'session' AND row_id = ?",
             (parent_id,),
         )
-        if parent is not None:
+        if parent is not None and parent["origin_device_id"] == origin:
             out.append(_replica_out(parent))
     return out
 
@@ -893,7 +893,40 @@ def _session_mail_notify(hub: Hub, device: dict[str, Any], table: str, op: str, 
     owner = target["github_login"]
     if owner not in hub.visible(device["github_login"]):
         raise HTTPException(status_code=403, detail="target session is outside your teams")
+    parent_id = payload.get("session_id")
+    if not isinstance(parent_id, str) or parent_id == "":
+        raise HTTPException(status_code=400, detail="message activity requires session_id")
+    parent = hub.store.query_one(
+        "SELECT origin_device_id FROM row_replica WHERE table_name = 'session' AND row_id = ?",
+        (parent_id,),
+    )
+    if parent is None:
+        raise HTTPException(status_code=400, detail="message activity session_id is unknown")
+    if parent["origin_device_id"] != device["id"]:
+        raise HTTPException(status_code=403, detail="message activity session_id is not owned by this device")
     return [owner]
+
+
+def _validate_ping(hub: Hub, device: dict[str, Any], table: str, op: str, payload: dict[str, Any], replica: Any) -> None:
+    if table != "ping":
+        return
+    login = device["github_login"]
+    if op == "insert":
+        if payload.get("from_login") != login:
+            raise HTTPException(status_code=403, detail="from_login must be this device login")
+        target = payload.get("to_login")
+        if not isinstance(target, str) or target == "":
+            raise HTTPException(status_code=400, detail="to_login is required")
+        if target.lower() not in hub.visible(login):
+            raise HTTPException(status_code=403, detail="target is outside your teams")
+        return
+    if op != "update" or replica is None:
+        return
+    previous = loads(replica["payload"])
+    if not isinstance(previous, dict):
+        return
+    if payload.get("from_login") != previous.get("from_login") or payload.get("to_login") != previous.get("to_login"):
+        raise HTTPException(status_code=403, detail="cannot retarget a ping")
 
 
 def _reject_open_session_collision(hub: Hub, origin: str, table: str, op: str, row_id: str) -> None:
@@ -934,8 +967,6 @@ def _accept_event(hub: Hub, device: dict[str, Any], event: dict[str, Any]) -> li
         raise HTTPException(status_code=400, detail="payload must be an object")
     if not isinstance(occurred, str) or occurred == "":
         raise HTTPException(status_code=400, detail="occurred_at is required")
-    notify = _session_mail_notify(hub, device, table, op, payload)
-    _reject_open_session_collision(hub, origin, table, op, row_id)
     existing = hub.store.query_one(
         "SELECT * FROM ledger_event WHERE origin_device_id = ? AND origin_seq = ?",
         (origin, seq),
@@ -951,6 +982,8 @@ def _accept_event(hub: Hub, device: dict[str, Any], event: dict[str, Any]) -> li
         ):
             raise HTTPException(status_code=409, detail=f"origin_seq {seq} already exists with different content")
         return []
+    notify = _session_mail_notify(hub, device, table, op, payload)
+    _reject_open_session_collision(hub, origin, table, op, row_id)
     last = hub.store.query_one(
         "SELECT COALESCE(MAX(origin_seq), 0) AS m FROM ledger_event WHERE origin_device_id = ?",
         (origin,),
@@ -962,6 +995,7 @@ def _accept_event(hub: Hub, device: dict[str, Any], event: dict[str, Any]) -> li
         "SELECT origin_device_id, payload FROM row_replica WHERE table_name = ? AND row_id = ?",
         (table, row_id),
     )
+    _validate_ping(hub, device, table, op, payload, replica)
     ping_ack = False
     if table == "ping" and op == "update" and replica is not None:
         previous = loads(replica["payload"])
