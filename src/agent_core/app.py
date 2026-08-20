@@ -936,15 +936,17 @@ def _validate_ping(hub: Hub, device: dict[str, Any], table: str, op: str, payloa
 def _reject_open_session_collision(hub: Hub, origin: str, table: str, op: str, row_id: str) -> None:
     if table != "session" or op != "insert":
         return
+    seen = hub.store.query_one(
+        "SELECT origin_seq FROM ledger_event WHERE table_name = 'session' AND row_id = ? LIMIT 1",
+        (row_id,),
+    )
+    if seen is not None:
+        raise HTTPException(status_code=409, detail="session id is already open")
     replica = hub.store.query_one(
         "SELECT origin_device_id, payload FROM row_replica WHERE table_name = 'session' AND row_id = ?",
         (row_id,),
     )
     if replica is None:
-        return
-    previous = loads(replica["payload"])
-    status = previous.get("status") if isinstance(previous, dict) else None
-    if status == "closed":
         return
     raise HTTPException(status_code=409, detail="session id is already open")
 
@@ -1004,6 +1006,12 @@ def _accept_event(hub: Hub, device: dict[str, Any], event: dict[str, Any]) -> li
     if table == "ping" and op == "update" and replica is not None:
         previous = loads(replica["payload"])
         ping_ack = previous.get("to_login") == device["github_login"] and previous.get("id") == payload.get("id")
+        if ping_ack and isinstance(previous, dict):
+            for key, value in payload.items():
+                if key == "acked_at":
+                    continue
+                if previous.get(key) != value:
+                    raise HTTPException(status_code=403, detail="ack cannot rewrite ping fields")
     if replica is not None and replica["origin_device_id"] != origin and not ping_ack:
         raise HTTPException(status_code=403, detail="row belongs to another device")
     write_origin = replica["origin_device_id"] if ping_ack and replica is not None else origin
