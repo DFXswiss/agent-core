@@ -57,7 +57,7 @@ An `activity` insert with `payload.type=message` must set `payload.payload.to_se
 - Sender is not allowed to see the owning login of that session → 403.
 - Open session ids are unique; the hub uses that uniqueness to route the snapshot.
 
-Website-created person pings use synthetic origin `web:<login>`. Ack does not transfer ownership of the ping row.
+Website-created person pings use synthetic origin `web:<login>`. `POST /api/pings/{id}/ack` records a `web:<recipient-login>` event, does not transfer replica ownership of the ping row, and does not consume the sender device's `origin_seq`.
 
 ### Pull and restore
 

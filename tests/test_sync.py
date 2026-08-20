@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
+from agent_core.db import loads
 from tests.conftest import pair_device, sign_in
 
 
@@ -138,6 +139,71 @@ def test_ping_team_only(hub: TestClient) -> None:
     found = [p for p in state["pings"] if p["id"] == ping_id]
     assert len(found) == 1
     assert found[0]["acked_at"]
+
+
+def test_ping_ack_uses_web_origin_not_device_seq(hub: TestClient) -> None:
+    alice_dev = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaa20"
+    alice = pair_device(hub, "code-alice", alice_dev)
+    first = event(alice_dev, 1, row_id="task-ack-seq", title="own")
+    assert (
+        hub.post("/sync/push", headers={"Authorization": f"Bearer {alice}"}, json={"events": [first]}).status_code
+        == 200
+    )
+    ping = {
+        "origin_device_id": alice_dev,
+        "origin_seq": 2,
+        "table": "ping",
+        "op": "insert",
+        "row_id": "ping-device",
+        "payload": {
+            "id": "ping-device",
+            "from_login": "alice",
+            "to_login": "bob",
+            "kind": "ping",
+            "body": "hi",
+        },
+        "occurred_at": "2026-08-13T12:00:00Z",
+    }
+    assert hub.post("/sync/push", headers={"Authorization": f"Bearer {alice}"}, json={"events": [ping]}).status_code == 200
+    sign_in(hub, "code-bob")
+    import asyncio
+
+    before_web = hub.app.state.hub.store.query_one(
+        "SELECT COALESCE(MAX(origin_seq), 0) AS m FROM ledger_event WHERE origin_device_id = ?",
+        ("web:bob",),
+    )
+    seen: asyncio.Queue[dict] = asyncio.Queue(maxsize=8)
+    hub.app.state.hub.queues.append(("alice", seen))
+    try:
+        ack = hub.post("/api/pings/ping-device/ack")
+        assert ack.status_code == 200, ack.text
+        fanout = seen.get_nowait()
+    finally:
+        item = ("alice", seen)
+        if item in hub.app.state.hub.queues:
+            hub.app.state.hub.queues.remove(item)
+    assert fanout["type"] == "ping"
+    assert fanout["id"] == "ping-device"
+    assert fanout["from"] == "alice"
+    assert fanout["to"] == "bob"
+    assert fanout["login"] == "alice"
+    replica = hub.app.state.hub.store.query_one(
+        "SELECT origin_device_id, payload FROM row_replica WHERE table_name = 'ping' AND row_id = ?",
+        ("ping-device",),
+    )
+    assert replica["origin_device_id"] == alice_dev
+    replica_payload = loads(replica["payload"])
+    assert replica_payload["acked_at"] == ack.json()["acked_at"]
+    ack_event = hub.app.state.hub.store.query_one(
+        "SELECT origin_device_id, origin_seq, payload FROM ledger_event WHERE table_name = 'ping' AND op = 'update' AND row_id = ?",
+        ("ping-device",),
+    )
+    assert ack_event["origin_device_id"] == "web:bob"
+    assert ack_event["origin_seq"] == int(before_web["m"]) + 1
+    assert loads(ack_event["payload"])["acked_at"] == ack.json()["acked_at"]
+    again = event(alice_dev, 3, row_id="task-after-ack", title="after")
+    pushed = hub.post("/sync/push", headers={"Authorization": f"Bearer {alice}"}, json={"events": [again]})
+    assert pushed.status_code == 200, pushed.text
 
 
 def _session_event(device: str, seq: int, session_id: str, status: str = "active") -> dict:
