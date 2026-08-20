@@ -1005,13 +1005,13 @@ def _accept_event(hub: Hub, device: dict[str, Any], event: dict[str, Any]) -> li
     ping_ack = False
     if table == "session" and op == "update" and replica is None:
         raise HTTPException(status_code=404, detail="unknown session")
+    replica_encoded = encoded
     if table == "ping" and op == "update" and replica is not None:
         previous = loads(replica["payload"])
         ping_ack = previous.get("to_login") == device["github_login"] and previous.get("id") == payload.get("id")
         if ping_ack and isinstance(previous, dict):
             previous["acked_at"] = payload.get("acked_at")
-            payload = previous
-            encoded = dumps(payload)
+            replica_encoded = dumps(previous)
     if replica is not None and replica["origin_device_id"] != origin and not ping_ack:
         raise HTTPException(status_code=403, detail="row belongs to another device")
     write_origin = replica["origin_device_id"] if ping_ack and replica is not None else origin
@@ -1029,7 +1029,7 @@ def _accept_event(hub: Hub, device: dict[str, Any], event: dict[str, Any]) -> li
     if ping_ack:
         hub.store.execute(
             "UPDATE row_replica SET payload = ?, updated_at = ? WHERE table_name = ? AND row_id = ?",
-            (encoded, utcnow(), table, row_id),
+            (replica_encoded, utcnow(), table, row_id),
         )
         return []
     hub.store.execute(
@@ -1037,6 +1037,6 @@ def _accept_event(hub: Hub, device: dict[str, Any], event: dict[str, Any]) -> li
         "VALUES (?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(table_name, row_id) DO UPDATE SET origin_device_id = excluded.origin_device_id, "
         "github_login = excluded.github_login, payload = excluded.payload, updated_at = excluded.updated_at",
-        (table, row_id, write_origin, device["github_login"], encoded, utcnow()),
+        (table, row_id, write_origin, device["github_login"], replica_encoded, utcnow()),
     )
     return notify
