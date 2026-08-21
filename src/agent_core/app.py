@@ -40,6 +40,12 @@ CONTROL_KEYS = frozenset({"enter", "ctrl-c", "tab"})
 PAIR_TTL_SECONDS = 600
 TERMINAL_RING_SIZE = 64
 TERMINAL_CHUNK_MAX = 8192
+MATCH_PATHS = frozenset({"type", "payload.repo", "payload.issue_key", "payload.to_session"})
+MAX_SUBSCRIPTIONS = 32
+MAX_MATCH_PREDICATES = 4
+MAX_IN_VALUES = 16
+QUERY_ROW_CAP = 500
+_MISSING = object()
 
 
 class Hub:
@@ -49,6 +55,7 @@ class Hub:
         self.store = store
         self.teams = teams
         self.queues: list[tuple[str, asyncio.Queue[dict[str, Any]]]] = []
+        self.device_queues: dict[str, asyncio.Queue[dict[str, Any]]] = {}
         self.control_ready: dict[str, asyncio.Queue[dict[str, Any]]] = {}
         self.terminal_rings: dict[str, list[dict[str, Any]]] = {}
         self.terminal_queues: list[tuple[str, str, asyncio.Queue[dict[str, Any]]]] = []
@@ -280,10 +287,14 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
             raise HTTPException(status_code=400, detail="events must be a list")
         accepted = 0
         notify_to: set[str] = set()
+        materialized: list[dict[str, Any]] = []
         for event in events:
             if not isinstance(event, dict):
                 raise HTTPException(status_code=400, detail="event must be an object")
-            notify_to.update(_accept_event(hub, device, event))
+            notify, snap = _accept_event(hub, device, event)
+            notify_to.update(notify)
+            if snap is not None:
+                materialized.append(snap)
             accepted += 1
         if accepted:
             await hub.publish({"type": "events", "login": device["github_login"], "count": accepted})
@@ -296,6 +307,8 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                         "count": accepted,
                     }
                 )
+            for snap in materialized:
+                _enqueue_subscription_fanout(hub, snap)
         return {"accepted": accepted}
 
     @app.get("/sync/pull")
@@ -306,6 +319,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
             "events": _own_events(hub, device["id"], cursors),
             "inbox": _inbox_snapshots(hub, device["id"]),
             "pings": _ping_snapshots(hub, device["github_login"]),
+            "subscriptions": _subscription_snapshots(hub, device),
         }
 
     @app.get("/sync/restore")
@@ -319,6 +333,35 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
             "inbox": _inbox_snapshots(hub, device["id"]),
             "pings": _ping_snapshots(hub, device["github_login"]),
         }
+
+    @app.put("/sync/subscriptions")
+    def sync_subscriptions_put(request: Request, body: dict[str, Any]) -> dict[str, Any]:
+        device = hub.device_for_token(bearer(request))
+        raw = body.get("subscriptions")
+        if not isinstance(raw, list):
+            raise HTTPException(status_code=400, detail="subscriptions must be a list")
+        if len(raw) > MAX_SUBSCRIPTIONS:
+            raise HTTPException(status_code=400, detail="at most 32 subscriptions per device")
+        match_jsons: list[str] = []
+        for item in raw:
+            if not isinstance(item, dict) or set(item.keys()) != {"match"}:
+                raise HTTPException(status_code=400, detail="each subscription must be an object with exactly one key match")
+            match_jsons.append(dumps(_validate_match(item["match"])))
+        hub.store.replace_device_subscriptions(device["id"], match_jsons)
+        return _subscriptions_response(hub, device["id"])
+
+    @app.get("/sync/subscriptions")
+    def sync_subscriptions_get(request: Request) -> dict[str, Any]:
+        device = hub.device_for_token(bearer(request))
+        return _subscriptions_response(hub, device["id"])
+
+    @app.post("/sync/query")
+    def sync_query(request: Request, body: dict[str, Any]) -> dict[str, Any]:
+        device = hub.device_for_token(bearer(request))
+        if not isinstance(body, dict) or "match" not in body:
+            raise HTTPException(status_code=400, detail="match is required")
+        match = _validate_match(body["match"])
+        return {"rows": _query_matching_rows(hub, device["github_login"], match)}
 
     @app.get("/api/state")
     def api_state(request: Request) -> dict[str, Any]:
@@ -539,6 +582,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         login = device["github_login"]
         device_id = device["id"]
         hub.queues.append((login, queue))
+        hub.device_queues[device_id] = queue
         out_task: asyncio.Task[None] | None = None
         try:
             await ws.send_json({"type": "hello", "login": login, "device_id": device_id})
@@ -580,6 +624,8 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                     pass
             if hub.control_ready.get(device_id) is queue:
                 hub.control_ready.pop(device_id, None)
+            if hub.device_queues.get(device_id) is queue:
+                hub.device_queues.pop(device_id, None)
             item = (login, queue)
             if item in hub.queues:
                 hub.queues.remove(item)
@@ -960,7 +1006,9 @@ def _reject_open_session_collision(hub: Hub, origin: str, table: str, op: str, r
     raise HTTPException(status_code=409, detail="session id is already open")
 
 
-def _accept_event(hub: Hub, device: dict[str, Any], event: dict[str, Any]) -> list[str]:
+def _accept_event(
+    hub: Hub, device: dict[str, Any], event: dict[str, Any]
+) -> tuple[list[str], dict[str, Any] | None]:
     origin = event.get("origin_device_id")
     if origin != device["id"]:
         raise HTTPException(status_code=403, detail="cannot push events for another device")
@@ -996,7 +1044,7 @@ def _accept_event(hub: Hub, device: dict[str, Any], event: dict[str, Any]) -> li
             or existing["occurred_at"] != occurred
         ):
             raise HTTPException(status_code=409, detail=f"origin_seq {seq} already exists with different content")
-        return []
+        return [], None
     notify = _session_mail_notify(hub, device, table, op, payload)
     _reject_open_session_collision(hub, origin, table, op, row_id)
     last = hub.store.query_one(
@@ -1034,18 +1082,179 @@ def _accept_event(hub: Hub, device: dict[str, Any], event: dict[str, Any]) -> li
             "DELETE FROM row_replica WHERE table_name = ? AND row_id = ?",
             (table, row_id),
         )
-        return []
+        return [], None
+    updated_at = utcnow()
     if ping_ack:
         hub.store.execute(
             "UPDATE row_replica SET payload = ?, updated_at = ? WHERE table_name = ? AND row_id = ?",
-            (replica_encoded, utcnow(), table, row_id),
+            (replica_encoded, updated_at, table, row_id),
         )
-        return []
+        row = hub.store.query_one(
+            "SELECT * FROM row_replica WHERE table_name = ? AND row_id = ?",
+            (table, row_id),
+        )
+        return [], _replica_out(row) if row is not None else None
     hub.store.execute(
         "INSERT INTO row_replica (table_name, row_id, origin_device_id, github_login, payload, updated_at) "
         "VALUES (?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(table_name, row_id) DO UPDATE SET origin_device_id = excluded.origin_device_id, "
         "github_login = excluded.github_login, payload = excluded.payload, updated_at = excluded.updated_at",
-        (table, row_id, write_origin, device["github_login"], replica_encoded, utcnow()),
+        (table, row_id, write_origin, device["github_login"], replica_encoded, updated_at),
     )
-    return notify
+    return notify, {
+        "table": table,
+        "row_id": row_id,
+        "origin_device_id": write_origin,
+        "github_login": device["github_login"],
+        "payload": loads(replica_encoded),
+        "updated_at": updated_at,
+    }
+
+
+def _validate_match(match: Any) -> dict[str, Any]:
+    if not isinstance(match, dict):
+        raise HTTPException(status_code=400, detail="match must be an object")
+    if len(match) > MAX_MATCH_PREDICATES:
+        raise HTTPException(status_code=400, detail="at most 4 predicates per match")
+    out: dict[str, Any] = {}
+    for path, value in match.items():
+        if path not in MATCH_PATHS:
+            raise HTTPException(status_code=400, detail="unknown match path")
+        if isinstance(value, str):
+            if value == "":
+                raise HTTPException(status_code=400, detail="match equality string must be non-empty")
+            out[path] = value
+            continue
+        if isinstance(value, dict):
+            if set(value.keys()) != {"in"}:
+                raise HTTPException(status_code=400, detail="match object value must have only key in")
+            in_list = value["in"]
+            if not isinstance(in_list, list) or len(in_list) == 0:
+                raise HTTPException(status_code=400, detail="in must be a non-empty list of strings")
+            if len(in_list) > MAX_IN_VALUES:
+                raise HTTPException(status_code=400, detail="at most 16 strings in each in")
+            if not all(isinstance(item, str) for item in in_list):
+                raise HTTPException(status_code=400, detail="in must be a non-empty list of strings")
+            out[path] = {"in": list(in_list)}
+            continue
+        raise HTTPException(status_code=400, detail="match value must be a string or in-object")
+    return out
+
+
+def _match_path_lookup(payload: dict[str, Any], path: str) -> Any:
+    if path == "type":
+        if "type" not in payload:
+            return _MISSING
+        return payload["type"]
+    if path.startswith("payload."):
+        key = path[len("payload.") :]
+        inner = payload.get("payload")
+        if not isinstance(inner, dict) or key not in inner:
+            return _MISSING
+        return inner[key]
+    return _MISSING
+
+
+def _match_applies(match: dict[str, Any], payload: dict[str, Any]) -> bool:
+    for path, pred in match.items():
+        value = _match_path_lookup(payload, path)
+        if value is _MISSING:
+            return False
+        if isinstance(pred, str):
+            if value != pred:
+                return False
+            continue
+        if value not in pred["in"]:
+            return False
+    return True
+
+
+def _device_matches(hub: Hub, device_id: str) -> list[dict[str, Any]]:
+    rows = hub.store.query(
+        "SELECT match_json FROM device_subscription WHERE device_id = ? ORDER BY seq ASC",
+        (device_id,),
+    )
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        loaded = loads(row["match_json"])
+        if isinstance(loaded, dict):
+            out.append(loaded)
+    return out
+
+
+def _subscriptions_response(hub: Hub, device_id: str) -> dict[str, Any]:
+    return {"subscriptions": [{"match": m} for m in _device_matches(hub, device_id)]}
+
+
+def _visible_replica_rows(hub: Hub, login: str) -> list[Any]:
+    allowed = hub.visible(login)
+    return hub.store.query(
+        "SELECT * FROM row_replica WHERE github_login IN ({}) ORDER BY table_name ASC, row_id ASC".format(
+            _placeholders(allowed)
+        ),
+        tuple(sorted(allowed)),
+    )
+
+
+def _subscription_snapshots(hub: Hub, device: dict[str, Any]) -> list[dict[str, Any]]:
+    matches = _device_matches(hub, device["id"])
+    if not matches:
+        return []
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for row in _visible_replica_rows(hub, device["github_login"]):
+        payload = loads(row["payload"])
+        if not isinstance(payload, dict):
+            continue
+        if not any(_match_applies(match, payload) for match in matches):
+            continue
+        key = (row["table_name"], row["row_id"])
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(_replica_out(row))
+    return out
+
+
+def _query_matching_rows(hub: Hub, login: str, match: dict[str, Any]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for row in _visible_replica_rows(hub, login):
+        payload = loads(row["payload"])
+        if not isinstance(payload, dict):
+            continue
+        if not _match_applies(match, payload):
+            continue
+        out.append(_replica_out(row))
+        if len(out) >= QUERY_ROW_CAP:
+            break
+    return out
+
+
+def _enqueue_subscription_fanout(hub: Hub, snap: dict[str, Any]) -> None:
+    payload = snap.get("payload")
+    if not isinstance(payload, dict):
+        return
+    owner = snap.get("github_login")
+    if not isinstance(owner, str):
+        return
+    devices = hub.store.query(
+        "SELECT DISTINCT d.id AS device_id, d.github_login AS github_login "
+        "FROM device d "
+        "JOIN device_subscription s ON s.device_id = d.id "
+        "WHERE d.revoked_at IS NULL"
+    )
+    for device in devices:
+        device_id = device["device_id"]
+        login = device["github_login"]
+        if owner not in hub.visible(login):
+            continue
+        matches = _device_matches(hub, device_id)
+        if not any(_match_applies(match, payload) for match in matches):
+            continue
+        queue = hub.device_queues.get(device_id)
+        if queue is None:
+            continue
+        try:
+            queue.put_nowait({"type": "subscription", "rows": [snap]})
+        except asyncio.QueueFull:
+            continue
