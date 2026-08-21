@@ -230,6 +230,14 @@ def _activity_event(device: str, seq: int, row_id: str, payload: dict) -> dict:
     }
 
 
+def _recv_until(ws, pred, limit: int = 20) -> dict:
+    for _ in range(limit):
+        msg = ws.receive_json()
+        if pred(msg):
+            return msg
+    raise AssertionError("expected message not received")
+
+
 def test_open_session_id_is_unique(hub: TestClient) -> None:
     alice_dev = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaa10"
     bob_dev = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbb10"
@@ -443,3 +451,198 @@ def test_device_cannot_spoof_ping_from_login(hub: TestClient) -> None:
     missing["payload"]["from_login"] = "dave"
     ghost = hub.post("/sync/push", headers={"Authorization": f"Bearer {dave}"}, json={"events": [missing]})
     assert ghost.status_code == 404
+
+
+def test_subscriptions_put_validation(hub: TestClient) -> None:
+    alice_dev = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaa30"
+    alice = pair_device(hub, "code-alice", alice_dev)
+    unknown = hub.put(
+        "/sync/subscriptions",
+        headers={"Authorization": f"Bearer {alice}"},
+        json={"subscriptions": [{"match": {"payload.unknown": "x"}}]},
+    )
+    assert unknown.status_code == 400
+    assert unknown.json()["detail"] == "unknown match path"
+    empty_in = hub.put(
+        "/sync/subscriptions",
+        headers={"Authorization": f"Bearer {alice}"},
+        json={"subscriptions": [{"match": {"type": {"in": []}}}]},
+    )
+    assert empty_in.status_code == 400
+    no_auth = hub.put("/sync/subscriptions", json={"subscriptions": []})
+    assert no_auth.status_code == 401
+
+
+def test_subscriptions_put_get_replace(hub: TestClient) -> None:
+    alice_dev = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaa31"
+    alice = pair_device(hub, "code-alice", alice_dev)
+    first = hub.put(
+        "/sync/subscriptions",
+        headers={"Authorization": f"Bearer {alice}"},
+        json={
+            "subscriptions": [
+                {"match": {"type": "investigate.step"}},
+                {"match": {"type": "pr.open", "payload.repo": "owner/repo"}},
+            ]
+        },
+    )
+    assert first.status_code == 200, first.text
+    assert first.json()["subscriptions"] == [
+        {"match": {"type": "investigate.step"}},
+        {"match": {"payload.repo": "owner/repo", "type": "pr.open"}},
+    ]
+    got = hub.get("/sync/subscriptions", headers={"Authorization": f"Bearer {alice}"})
+    assert got.status_code == 200
+    assert got.json() == first.json()
+    replaced = hub.put(
+        "/sync/subscriptions",
+        headers={"Authorization": f"Bearer {alice}"},
+        json={"subscriptions": [{"match": {"type": "task.open"}}]},
+    )
+    assert replaced.status_code == 200
+    assert replaced.json()["subscriptions"] == [{"match": {"type": "task.open"}}]
+    again = hub.get("/sync/subscriptions", headers={"Authorization": f"Bearer {alice}"})
+    assert again.json()["subscriptions"] == [{"match": {"type": "task.open"}}]
+    assert all(item["match"].get("type") != "investigate.step" for item in again.json()["subscriptions"])
+
+
+def test_subscriptions_pull_and_query_visibility(hub: TestClient) -> None:
+    alice_dev = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaa32"
+    bob_dev = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbb32"
+    dave_dev = "dddddddd-dddd-dddd-dddd-dddddddddd32"
+    alice = pair_device(hub, "code-alice", alice_dev)
+    bob = pair_device(hub, "code-bob", bob_dev)
+    dave = pair_device(hub, "code-dave", dave_dev)
+
+    bob_push = hub.post(
+        "/sync/push",
+        headers={"Authorization": f"Bearer {bob}"},
+        json={
+            "events": [
+                _activity_event(
+                    bob_dev,
+                    1,
+                    "act-step-32",
+                    {
+                        "id": "act-step-32",
+                        "session_id": "sess-b32",
+                        "type": "investigate.step",
+                        "payload": {"text": "look"},
+                    },
+                ),
+                event(bob_dev, 2, table="task", row_id="task-b32", title="Bob task"),
+            ]
+        },
+    )
+    assert bob_push.status_code == 200, bob_push.text
+    dave_push = hub.post(
+        "/sync/push",
+        headers={"Authorization": f"Bearer {dave}"},
+        json={
+            "events": [
+                _activity_event(
+                    dave_dev,
+                    1,
+                    "act-dave-32",
+                    {
+                        "id": "act-dave-32",
+                        "session_id": "sess-d32",
+                        "type": "investigate.step",
+                        "payload": {"text": "secret"},
+                    },
+                )
+            ]
+        },
+    )
+    assert dave_push.status_code == 200, dave_push.text
+
+    matcher = {"subscriptions": [{"match": {"type": "investigate.step"}}]}
+    assert (
+        hub.put("/sync/subscriptions", headers={"Authorization": f"Bearer {alice}"}, json=matcher).status_code
+        == 200
+    )
+    assert (
+        hub.put("/sync/subscriptions", headers={"Authorization": f"Bearer {dave}"}, json=matcher).status_code
+        == 200
+    )
+
+    alice_pull = hub.get("/sync/pull", headers={"Authorization": f"Bearer {alice}"}).json()
+    assert "subscriptions" in alice_pull
+    alice_sub_ids = {row["row_id"] for row in alice_pull["subscriptions"]}
+    assert "act-step-32" in alice_sub_ids
+    assert "task-b32" not in alice_sub_ids
+    assert "act-dave-32" not in alice_sub_ids
+
+    dave_pull = hub.get("/sync/pull", headers={"Authorization": f"Bearer {dave}"}).json()
+    dave_sub_ids = {row["row_id"] for row in dave_pull["subscriptions"]}
+    assert "act-step-32" not in dave_sub_ids
+    assert "act-dave-32" in dave_sub_ids
+    assert all(row.get("github_login") not in {"alice", "bob"} for row in dave_pull["subscriptions"])
+
+    query_body = {"match": {"type": "investigate.step"}}
+    alice_query = hub.post(
+        "/sync/query",
+        headers={"Authorization": f"Bearer {alice}"},
+        json=query_body,
+    )
+    assert alice_query.status_code == 200, alice_query.text
+    alice_rows = {row["row_id"] for row in alice_query.json()["rows"]}
+    assert "act-step-32" in alice_rows
+    assert "act-dave-32" not in alice_rows
+
+    dave_query = hub.post(
+        "/sync/query",
+        headers={"Authorization": f"Bearer {dave}"},
+        json=query_body,
+    )
+    assert dave_query.status_code == 200, dave_query.text
+    dave_rows = {row["row_id"] for row in dave_query.json()["rows"]}
+    assert "act-step-32" not in dave_rows
+    assert all(row.get("github_login") not in {"alice", "bob"} for row in dave_query.json()["rows"])
+
+    restore = hub.get("/sync/restore", headers={"Authorization": f"Bearer {alice}"}).json()
+    assert set(restore.keys()) >= {"own_events", "inbox", "pings", "device_id", "login"}
+    assert "subscriptions" not in restore
+
+
+def test_subscriptions_ws_push(hub: TestClient) -> None:
+    alice_dev = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaa33"
+    bob_dev = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbb33"
+    alice = pair_device(hub, "code-alice", alice_dev)
+    bob = pair_device(hub, "code-bob", bob_dev)
+
+    matcher = {"subscriptions": [{"match": {"type": "investigate.step"}}]}
+    assert (
+        hub.put("/sync/subscriptions", headers={"Authorization": f"Bearer {alice}"}, json=matcher).status_code
+        == 200
+    )
+
+    row_id = "act-step-33"
+    with hub.websocket_connect(f"/sync/ws?token={alice}") as ws:
+        push = hub.post(
+            "/sync/push",
+            headers={"Authorization": f"Bearer {bob}"},
+            json={
+                "events": [
+                    _activity_event(
+                        bob_dev,
+                        1,
+                        row_id,
+                        {
+                            "id": row_id,
+                            "session_id": "sess-b33",
+                            "type": "investigate.step",
+                            "payload": {"text": "look"},
+                        },
+                    )
+                ]
+            },
+        )
+        assert push.status_code == 200, push.text
+        frame = _recv_until(
+            ws,
+            lambda m: m.get("type") == "subscription"
+            and any(row.get("row_id") == row_id for row in (m.get("rows") or [])),
+        )
+        assert frame["type"] == "subscription"
+        assert any(row.get("row_id") == row_id for row in frame["rows"])

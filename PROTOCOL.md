@@ -69,13 +69,15 @@ Devices do **not** default-pull every visible origin. The website still reads th
 {
   "events": [],
   "inbox": [],
-  "pings": []
+  "pings": [],
+  "subscriptions": []
 }
 ```
 
 - `events` — this device's own events after the cursor for **this** origin, gapless. Other origins are omitted.
 - `inbox` — row snapshots: each `activity` with `type=message` whose `payload.to_session` this device owns, plus the parent `session` snapshot for that activity's `session_id`.
 - `pings` — person-ping row snapshots this login **sent or received** (not every team-visible ping).
+- `subscriptions` — replica snapshots that pass this device's stored matchers and are visible under §6 (`hub.visible`). Always present (empty list when none). Deduplicated by `(table, row_id)`.
 
 `GET /sync/restore` returns:
 
@@ -89,9 +91,47 @@ Devices do **not** default-pull every visible origin. The website still reads th
 }
 ```
 
-A wiped laptop replays `own_events` in `origin_seq` order, then applies `inbox` and `pings` as row snapshots (not a holey event stream).
+A wiped laptop replays `own_events` in `origin_seq` order, then applies `inbox` and `pings` as row snapshots (not a holey event stream). Restore does **not** include a `subscriptions` key.
 
-`GET /sync/ws?token=...` pushes `{type: events|ping|hello}` when new data arrives, including session-mail for the recipient login. The same socket also accepts inbound control messages (see Control). Clients that never send `control-ready` keep working as before.
+`GET /sync/ws?token=...` pushes `{type: events|ping|hello|subscription}` when new data arrives, including session-mail for the recipient login. The same socket also accepts inbound control messages (see Control). Clients that never send `control-ready` keep working as before.
+
+### Subscriptions and query
+
+Devices keep a **subscription set on the hub** (per device), not in the event log. Subscriptions are not ledger events.
+
+A **match** object is a JSON object. Evaluation is the AND of all entries. Allowed paths only:
+
+- `type`
+- `payload.repo`
+- `payload.issue_key`
+- `payload.to_session`
+
+Any other key is HTTP **400** `unknown match path`.
+
+Each value is either:
+
+- a string → equality against the dotted path on the replica payload (`type` → `payload["type"]`; `payload.repo` → `payload["payload"]["repo"]` when `payload["payload"]` is a dict)
+- `{"in": ["a", "b"]}` → membership; `in` must be a non-empty list of strings
+
+A missing path fails that predicate (the row does not match); it is not 400. Caps: at most 32 subscriptions per device; at most 4 predicates per match; at most 16 strings in each `in`. Exceed → 400.
+
+`PUT /sync/subscriptions` (device bearer) replaces the whole set in one transaction:
+
+```json
+{ "subscriptions": [ { "match": { "type": "investigate.step" } } ] }
+```
+
+Response 200 echoes `{ "subscriptions": [ { "match": { ... } } ] }` in stored order. An empty list clears. `GET /sync/subscriptions` returns the same body for the calling device.
+
+`POST /sync/query` is a one-shot matcher, not a pull and not stored:
+
+```json
+{ "match": { "type": "pr.open", "payload.repo": "owner/repo" } }
+```
+
+Response 200: `{ "rows": [ <replica_out>, ... ] }` — only rows whose `github_login` is in `hub.visible(caller)`, only matcher-passing rows, ordered by `table_name`, `row_id`, capped at 500.
+
+When a push materializes a replica row (insert/update), device WebSocket queues may also receive `{ "type": "subscription", "rows": [ <replica_out> ] }` for matchers that pass and visibility that allows it. Browser cookie SSE (`/api/stream`) does not get subscription frames. If the device has no open `/sync/ws` queue, pull catches up.
 
 ## Control
 
