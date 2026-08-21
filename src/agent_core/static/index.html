@@ -148,7 +148,7 @@
       const tb = document.querySelector("#prs tbody");
       const sub = document.getElementById("prs-sub");
       if (source === "none") {
-        sub.innerHTML = 'GitHub access is missing (hub restart). <a href="/auth/github">Sign in with GitHub</a> again to load PRs.';
+        sub.innerHTML = 'GitHub access is missing. <a href="/auth/github">Sign in with GitHub</a> again to load PRs.';
         tb.innerHTML = "<tr><td colspan='6'>—</td></tr>";
         return;
       }

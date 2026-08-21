@@ -158,5 +158,5 @@ def test_index_lists_pr_columns() -> None:
         assert f"<th>{col}</th>" in html
     assert 'id="prs"' in html
     assert html.index('id="prs"') < html.index('id="sessions"')
-    assert "Sign in with GitHub" in html
+    assert "GitHub access is missing" in html
     assert "source === \"none\"" in html or "source === 'none'" in html
