@@ -10,7 +10,7 @@ This repository does not describe a particular deployment environment. Run it an
 
 ## Run locally
 
-Create a GitHub OAuth App whose callback is `http://127.0.0.1:8787/auth/github/callback`. Then:
+Create a GitHub OAuth App whose callback is `http://127.0.0.1:8787/auth/github/callback`. The hub requests scopes `read:user` and `repo` so the website can list private open PRs as the signed-in user. Then:
 
 ```bash
 python3 -m venv .venv

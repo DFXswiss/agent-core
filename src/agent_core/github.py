@@ -179,4 +179,9 @@ class FakeGitHub(GitHub):
         if token == "" or not token.startswith("tok-"):
             return []
         allowed = {m.strip().lower() for m in logins}
-        return [p for p in self._prs if str(p.get("author", "")).lower() in allowed]
+        return [
+            p
+            for p in self._prs
+            if str(p.get("author", "")).lower() in allowed
+            or str(p.get("assignee", "")).lower() in allowed
+        ]
