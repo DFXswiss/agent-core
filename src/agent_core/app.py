@@ -59,6 +59,7 @@ class Hub:
         self.control_ready: dict[str, asyncio.Queue[dict[str, Any]]] = {}
         self.terminal_rings: dict[str, list[dict[str, Any]]] = {}
         self.terminal_queues: list[tuple[str, str, asyncio.Queue[dict[str, Any]]]] = []
+        self.github_tokens: dict[str, str] = {}
 
     def visible(self, login: str) -> set[str]:
         return visible_logins(login, self.teams)
@@ -185,6 +186,8 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
             raise HTTPException(status_code=401, detail=str(exc)) from exc
         request.session.pop("oauth_state", None)
         request.session["login"] = user.login
+        if user.token:
+            hub.github_tokens[user.login] = user.token
         dest = request.session.pop("after_login", "/")
         if not isinstance(dest, str) or not dest.startswith("/"):
             dest = "/"
@@ -192,6 +195,9 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
 
     @app.post("/auth/logout")
     def auth_logout(request: Request) -> JSONResponse:
+        login = request.session.get("login")
+        if isinstance(login, str) and login:
+            hub.github_tokens.pop(login, None)
         request.session.clear()
         return JSONResponse({"ok": True})
 
@@ -362,6 +368,20 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
             raise HTTPException(status_code=400, detail="match is required")
         match = _validate_match(body["match"])
         return {"rows": _query_matching_rows(hub, device["github_login"], match)}
+
+    @app.get("/api/prs")
+    def api_prs(request: Request) -> dict[str, Any]:
+        login = hub.session_login(request)
+        allowed = sorted(hub.visible(login))
+        token = hub.github_tokens.get(login, "")
+        if token == "":
+            return {"generated_at": utcnow(), "prs": [], "source": "none"}
+        try:
+            prs = hub.github.search_open_prs(token, allowed)
+        except GitHubError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        truncated = len(prs) >= 50
+        return {"generated_at": utcnow(), "prs": prs, "source": "github", "truncated": truncated}
 
     @app.get("/api/state")
     def api_state(request: Request) -> dict[str, Any]:
