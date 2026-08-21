@@ -185,6 +185,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
             raise HTTPException(status_code=401, detail=str(exc)) from exc
         request.session.pop("oauth_state", None)
         request.session["login"] = user.login
+        request.session["github_token"] = user.token
         dest = request.session.pop("after_login", "/")
         if not isinstance(dest, str) or not dest.startswith("/"):
             dest = "/"
@@ -362,6 +363,19 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
             raise HTTPException(status_code=400, detail="match is required")
         match = _validate_match(body["match"])
         return {"rows": _query_matching_rows(hub, device["github_login"], match)}
+
+    @app.get("/api/prs")
+    def api_prs(request: Request) -> dict[str, Any]:
+        login = hub.session_login(request)
+        allowed = sorted(hub.visible(login))
+        token = request.session.get("github_token")
+        if not isinstance(token, str) or token == "":
+            return {"generated_at": utcnow(), "prs": [], "source": "none"}
+        try:
+            prs = hub.github.search_open_prs(token, allowed)
+        except GitHubError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return {"generated_at": utcnow(), "prs": prs, "source": "github"}
 
     @app.get("/api/state")
     def api_state(request: Request) -> dict[str, Any]:

@@ -47,6 +47,8 @@ teams:
 
 Logins are compared in lowercase. A login that appears on no team still signs in and still syncs; they only see themselves.
 
+After GitHub sign-in the website leads with a table of **open pull requests** for everyone you can see (author or assignee): Author, Org, Repo, PR, Description, Status.
+
 ## Protocol
 
 See [PROTOCOL.md](PROTOCOL.md).

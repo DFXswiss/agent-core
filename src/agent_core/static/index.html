@@ -24,6 +24,8 @@
     .working, .implementing { color: #0b5; font-weight: 600; }
     .reviewing, .pr-review { color: #c60; font-weight: 600; }
     .failed { color: #c00; font-weight: 600; }
+    .draft { color: #c60; font-weight: 600; }
+    .open { color: #0b5; font-weight: 600; }
     #err { color: #c00; }
     .hidden { display: none; }
     input, select, textarea { padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px; font: inherit; }
@@ -58,11 +60,15 @@
       <p id="pair-msg"></p>
     </div>
     <div class="kpis">
+      <div class="kpi"><span>Open PRs</span><b id="k-prs">–</b></div>
       <div class="kpi"><span>Visible people</span><b id="k-people">–</b></div>
       <div class="kpi"><span>Open tasks</span><b id="k-tasks">–</b></div>
       <div class="kpi"><span>Working agents</span><b id="k-agents">–</b></div>
       <div class="kpi"><span>Open pings</span><b id="k-pings">–</b></div>
     </div>
+    <h2>Pull requests</h2>
+    <p class="sub">Open PRs authored or assigned to people you can see.</p>
+    <table id="prs"><thead><tr><th>Author</th><th>Org</th><th>Repo</th><th>PR</th><th>Description</th><th>Status</th></tr></thead><tbody></tbody></table>
     <h2>Sessions</h2>
     <table id="sessions"><thead><tr><th>Owner</th><th>Id</th><th>Kind</th><th>Status</th><th>Host</th><th>Last seen</th><th>Control</th></tr></thead><tbody></tbody></table>
     <div id="session-detail" class="hidden">
@@ -130,6 +136,28 @@
       const res = await fetch("/api/state");
       if (!res.ok) throw new Error("HTTP " + res.status);
       return res.json();
+    }
+
+    async function prs() {
+      const res = await fetch("/api/prs");
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      return res.json();
+    }
+
+    function fillPrs(rows) {
+      const tb = document.querySelector("#prs tbody");
+      const list = rows || [];
+      tb.innerHTML = list.map(r => {
+        const href = r.url ? `<a href="${esc(r.url)}" target="_blank" rel="noopener">#${esc(r.number)}</a>` : esc(r.number);
+        return `<tr>
+          <td>${esc(r.author)}</td>
+          <td>${esc(r.org)}</td>
+          <td>${esc(r.repo)}</td>
+          <td>${href}</td>
+          <td>${esc(r.title)}</td>
+          <td class="${esc(r.status)}">${esc(r.status)}</td>
+        </tr>`;
+      }).join("") || "<tr><td colspan='6'>—</td></tr>";
     }
 
     function fill(id, rows, cols) {
@@ -271,15 +299,19 @@
         document.getElementById("team-list").textContent = user.teams.length ? user.teams.join(", ") : "none (self only)";
         if (challenge) document.getElementById("pair-box").classList.remove("hidden");
         const data = await state();
+        const prData = await prs();
         err.hidden = true;
         document.getElementById("stamp").textContent = data.generated_at;
         const tasks = (data.task || []).filter(t => t.state !== "done" && t.state !== "failed");
         const working = (data.agent || []).filter(a => a.status === "working");
         const pings = (data.pings || []).filter(p => !p.acked_at);
+        const openPrs = prData.prs || [];
+        document.getElementById("k-prs").textContent = openPrs.length;
         document.getElementById("k-people").textContent = data.visible.length;
         document.getElementById("k-tasks").textContent = tasks.length;
         document.getElementById("k-agents").textContent = working.length;
         document.getElementById("k-pings").textContent = pings.length;
+        fillPrs(openPrs);
         fillSessions(data.session || []);
         updateOpenSessionFromState(data.session || []);
         fill("tasks", data.task || [], ["_github_login", "title", "state", "current_round", "workflow"]);

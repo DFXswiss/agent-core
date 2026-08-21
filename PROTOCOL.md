@@ -255,6 +255,7 @@ Otherwise JSON snapshot:
 Cookie session after GitHub OAuth.
 
 - `GET /auth/me` — login, visible logins, teams.
+- `GET /api/prs` — open GitHub pull requests authored or assigned to visible team logins (GitHub search as the signed-in user). Columns: author, org, repo, number, title, status (`open`|`draft`), url.
 - `GET /api/state` — materialized rows the caller may see (sessions include `can_control` and `control_connected`).
 - `GET /api/sessions/{id}` — one visible session plus control flags.
 - `POST /api/sessions/{id}/control` — start / stop / input / resize (owner device only).
