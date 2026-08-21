@@ -115,6 +115,34 @@ def test_api_prs_includes_assignee(hub, github: FakeGitHub) -> None:
     assert [p["number"] for p in body["prs"]] == [9]
 
 
+def test_prs_survive_new_hub(cfg, github: FakeGitHub) -> None:
+    from fastapi.testclient import TestClient
+
+    from agent_core.app import create_app
+    from agent_core.db import Store
+
+    github._prs = [
+        {
+            "author": "alice",
+            "org": "acme",
+            "repo": "app",
+            "number": 7,
+            "title": "Fix login",
+            "status": "draft",
+            "url": "https://github.com/acme/app/pull/7",
+        }
+    ]
+    store = Store(cfg.database)
+    first = TestClient(create_app(cfg, github=github, store=store))
+    sign_in(first, "code-alice")
+    assert first.get("/api/prs").json()["source"] == "github"
+    second = TestClient(create_app(cfg, github=github, store=store))
+    second.cookies.update(first.cookies)
+    body = second.get("/api/prs").json()
+    assert body["source"] == "github"
+    assert [p["number"] for p in body["prs"]] == [7]
+
+
 def test_auth_me_has_no_token(hub) -> None:
     sign_in(hub, "code-alice")
     me = hub.get("/auth/me").json()
@@ -130,3 +158,5 @@ def test_index_lists_pr_columns() -> None:
         assert f"<th>{col}</th>" in html
     assert 'id="prs"' in html
     assert html.index('id="prs"') < html.index('id="sessions"')
+    assert "Sign in with GitHub" in html
+    assert "source === \"none\"" in html or "source === 'none'" in html

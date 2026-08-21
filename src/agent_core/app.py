@@ -60,6 +60,8 @@ class Hub:
         self.terminal_rings: dict[str, list[dict[str, Any]]] = {}
         self.terminal_queues: list[tuple[str, str, asyncio.Queue[dict[str, Any]]]] = []
         self.github_tokens: dict[str, str] = {}
+        for login, token in self.store.all_oauth_tokens():
+            self.github_tokens[login] = token
 
     def visible(self, login: str) -> set[str]:
         return visible_logins(login, self.teams)
@@ -188,6 +190,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         request.session["login"] = user.login
         if user.token:
             hub.github_tokens[user.login] = user.token
+            hub.store.put_oauth_token(user.login, user.token)
         dest = request.session.pop("after_login", "/")
         if not isinstance(dest, str) or not dest.startswith("/"):
             dest = "/"
@@ -198,6 +201,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         login = request.session.get("login")
         if isinstance(login, str) and login:
             hub.github_tokens.pop(login, None)
+            hub.store.delete_oauth_token(login)
         request.session.clear()
         return JSONResponse({"ok": True})
 
@@ -374,6 +378,10 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         login = hub.session_login(request)
         allowed = sorted(hub.visible(login))
         token = hub.github_tokens.get(login, "")
+        if token == "":
+            token = hub.store.get_oauth_token(login)
+            if token:
+                hub.github_tokens[login] = token
         if token == "":
             return {"generated_at": utcnow(), "prs": [], "source": "none"}
         try:
