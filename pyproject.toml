@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "agent-core"
 version = "0.1.0"
-description = "Agent hub: GitHub login, device pairing, team-scoped ledger sync and restore."
+description = "Agent hub: GitHub login, device pairing, team-scoped session-store sync and restore."
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.11"

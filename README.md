@@ -1,6 +1,6 @@
 # agent-core
 
-Hub for the [agent](https://github.com/DFXswiss/agent) ledger.
+Hub for the [agent](https://github.com/DFXswiss/agent) session store.
 
 Anyone can sign in with GitHub. Each person sees their own work. People listed on a team in `teams.yaml` also see that team. Add or remove members with a pull request.
 
@@ -10,7 +10,7 @@ This repository does not describe a particular deployment environment. Run it an
 
 ## Run locally
 
-Create a GitHub OAuth App whose callback is `http://127.0.0.1:8787/auth/github/callback`. Then:
+Create a GitHub OAuth App whose callback is `http://127.0.0.1:8787/auth/github/callback`. The hub requests scopes `read:user` and `repo` so the website can list private open PRs as the signed-in user. Then:
 
 ```bash
 python3 -m venv .venv
@@ -47,9 +47,15 @@ teams:
 
 Logins are compared in lowercase. A login that appears on no team still signs in and still syncs; they only see themselves.
 
+After GitHub sign-in the website leads with a table of **open pull requests** for everyone you can see (author or assignee): Author, Org, Repo, PR, Description, Status.
+
 ## Protocol
 
 See [PROTOCOL.md](PROTOCOL.md).
+
+## Control
+
+Anyone who can see a session may watch its live terminal on the website. Start, stop, type, and resize are allowed only when the signed-in person owns the session's origin device and that device has a control-ready WebSocket. The hub relays control and terminal bytes; it does not run processes and does not author session rows. Details are in [PROTOCOL.md](PROTOCOL.md).
 
 ## Tests
 

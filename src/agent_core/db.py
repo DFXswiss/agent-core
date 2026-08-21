@@ -51,6 +51,14 @@ CREATE TABLE IF NOT EXISTS row_replica (
   PRIMARY KEY (table_name, row_id)
 );
 
+CREATE TABLE IF NOT EXISTS device_subscription (
+  device_id TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  match_json TEXT NOT NULL,
+  PRIMARY KEY (device_id, seq),
+  FOREIGN KEY (device_id) REFERENCES device(id)
+);
+
 CREATE INDEX IF NOT EXISTS event_origin_idx ON ledger_event (origin_device_id, origin_seq);
 CREATE INDEX IF NOT EXISTS replica_login_idx ON row_replica (github_login, table_name);
 CREATE INDEX IF NOT EXISTS device_login_idx ON device (github_login);
@@ -115,6 +123,21 @@ class Store:
         if len(rows) != 1:
             raise RuntimeError(f"expected 0 or 1 row, got {len(rows)}")
         return rows[0]
+
+    def replace_device_subscriptions(self, device_id: str, match_jsons: list[str]) -> None:
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._conn.execute("DELETE FROM device_subscription WHERE device_id = ?", (device_id,))
+                for seq, match_json in enumerate(match_jsons):
+                    self._conn.execute(
+                        "INSERT INTO device_subscription (device_id, seq, match_json) VALUES (?, ?, ?)",
+                        (device_id, seq, match_json),
+                    )
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
 
 
 def row_dict(row: sqlite3.Row) -> dict[str, Any]:
