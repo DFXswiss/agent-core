@@ -44,7 +44,10 @@ def test_checked_in_teams_yaml_loads() -> None:
     assert "taprootfreak" in listed
     assert "davidleomay" in listed
     teams = load_teams(path)
-    assert teams["dfx"] == ["taprootfreak", "davidleomay"]
+    assert "taprootfreak" in teams["dfx"]
+    assert "davidleomay" in teams["dfx"]
+    assert "taprootfreakai" in teams["dfx"]
+    assert "marassteiner" in teams["dfx"]
 
 
 def test_missing_teams_key(tmp_path: Path) -> None:
