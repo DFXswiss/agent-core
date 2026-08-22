@@ -411,7 +411,8 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         for key, table in tables.items():
             rows = hub.store.query(
                 "SELECT payload, github_login, origin_device_id FROM row_replica "
-                "WHERE table_name = ? AND github_login IN ({})".format(_placeholders(allowed)),
+                "WHERE table_name = ? AND github_login IN ({}) "
+                "ORDER BY updated_at DESC, row_id DESC".format(_placeholders(allowed)),
                 (table, *sorted(allowed)),
             )
             items = [_payload_with_origin(r) for r in rows]
@@ -424,7 +425,8 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
             out[key] = items
         devices = hub.store.query(
             "SELECT id, github_login, name, created_at, revoked_at FROM device "
-            "WHERE github_login IN ({})".format(_placeholders(allowed)),
+            "WHERE github_login IN ({}) "
+            "ORDER BY created_at DESC, id DESC".format(_placeholders(allowed)),
             tuple(sorted(allowed)),
         )
         out["devices"] = [row_dict(r) for r in devices]
