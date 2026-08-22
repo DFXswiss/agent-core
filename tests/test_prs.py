@@ -194,11 +194,16 @@ def test_index_lists_pr_columns() -> None:
     assert html.index('id="prs"') < html.index('id="sessions"')
     assert html.index('id="err"') < html.index('id="signed-in"')
     assert html.index('k-people").textContent') < html.index('jsonGet("/api/state"')
-    assert html.index('const prsP = jsonGet("/api/prs"') < html.index("await stateP")
-    assert html.index("const prsP = jsonGet") < html.index("await prsP")
+    assert html.index('k-people").textContent') < html.index('jsonGet("/api/prs"')
+    assert html.index("if (stateInflight)") < html.index('jsonGet("/api/state"')
+    assert html.index("if (prsInflight)") < html.index('jsonGet("/api/prs"')
+    assert "if (stateCtl) stateCtl.abort()" not in html
+    assert "if (prsCtl) prsCtl.abort()" not in html
     assert "if (gen !== renderGen) return" in html
-    assert "jsonGet(\"/api/state\", stateCtl, 15000)" in html
-    err_catch = html.split("Timed out loading sessions.", 1)[1]
-    assert "await prsP" in err_catch
+    assert 'jsonGet("/api/state", stateCtl, 15000)' in html
+    assert 'jsonGet("/api/prs", prsCtl, 25000)' in html
+    assert "await stateP" not in html
+    assert "await prsP" not in html
+    assert "Timed out loading PRs." in html
     assert "GitHub access is missing" in html
     assert "source === \"none\"" in html or "source === 'none'" in html

@@ -146,8 +146,10 @@
     let termEs = null;
     let openCanControl = false;
     let renderGen = 0;
-    let stateCtl = null;
-    let prsCtl = null;
+    let stateInflight = null;
+    let prsInflight = null;
+    let stateGen = 0;
+    let prsGen = 0;
 
     async function me() {
       const res = await fetch("/auth/me");
@@ -316,10 +318,6 @@
 
     async function render() {
       const gen = ++renderGen;
-      if (stateCtl) stateCtl.abort();
-      if (prsCtl) prsCtl.abort();
-      stateCtl = new AbortController();
-      prsCtl = new AbortController();
       const err = document.getElementById("err");
       try {
         const user = await me();
@@ -338,11 +336,19 @@
         err.textContent = String(e);
         return;
       }
-      const stateP = jsonGet("/api/state", stateCtl, 15000);
-      const prsP = jsonGet("/api/prs", prsCtl, 25000);
-      try {
-        const data = await stateP;
-        if (gen !== renderGen) return;
+      kickState();
+      kickPrs();
+    }
+
+    function kickState() {
+      if (stateInflight) return stateInflight.p;
+      const stateCtl = new AbortController();
+      const gen = ++stateGen;
+      const p = jsonGet("/api/state", stateCtl, 15000);
+      stateInflight = { ctl: stateCtl, p, gen };
+      p.then(data => {
+        if (!stateInflight || stateInflight.gen !== gen) return;
+        const err = document.getElementById("err");
         err.hidden = true;
         document.getElementById("stamp").textContent = data.generated_at;
         const tasks = (data.task || []).filter(t => t.state !== "done" && t.state !== "failed");
@@ -357,23 +363,37 @@
         fill("tasks", data.task || [], ["_github_login", "title", "state", "current_round", "workflow"]);
         fill("pings", data.pings || [], ["from_login", "to_login", "kind", "task_id", "acked_at", "_ack"]);
         fill("devices", (data.devices || []).filter(d => !d.revoked_at), ["github_login", "name", "id", "created_at"]);
-      } catch (e) {
-        if (gen !== renderGen) return;
+        stateInflight = null;
+      }).catch(e => {
+        if (!stateInflight || stateInflight.gen !== gen) return;
+        const err = document.getElementById("err");
         err.hidden = false;
         err.textContent = e.name === "AbortError" ? "Timed out loading sessions." : String(e);
-      }
-      try {
-        const prData = await prsP;
-        if (gen !== renderGen) return;
+        stateInflight = null;
+      });
+      return p;
+    }
+
+    function kickPrs() {
+      if (prsInflight) return prsInflight.p;
+      const prsCtl = new AbortController();
+      const gen = ++prsGen;
+      const p = jsonGet("/api/prs", prsCtl, 25000);
+      prsInflight = { ctl: prsCtl, p, gen };
+      p.then(prData => {
+        if (!prsInflight || prsInflight.gen !== gen) return;
         const openPrs = prData.prs || [];
         document.getElementById("k-prs").textContent = openPrs.length;
         fillPrs(openPrs, prData.source);
-      } catch (e) {
-        if (gen !== renderGen) return;
+        prsInflight = null;
+      }).catch(e => {
+        if (!prsInflight || prsInflight.gen !== gen) return;
         document.getElementById("k-prs").textContent = "–";
         document.getElementById("prs-sub").textContent = e.name === "AbortError" ? "Timed out loading PRs." : String(e);
         document.querySelector("#prs tbody").innerHTML = "<tr><td colspan='6'>—</td></tr>";
-      }
+        prsInflight = null;
+      });
+      return p;
     }
 
     document.getElementById("logout").onclick = async () => {
