@@ -319,6 +319,22 @@ def test_real_github_403_raises(cfg, monkeypatch) -> None:
         RealGitHub(cfg).search_open_prs("tok-xxxxxxxxxxxxxxxx", ["alice"])
 
 
+def test_real_github_does_not_cache_http_500(cfg, monkeypatch) -> None:
+    n = {"calls": 0}
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        n["calls"] += 1
+        return _Resp(500, {"message": "nope"})
+
+    monkeypatch.setattr("agent_core.github.httpx.get", fake_get)
+    gh = RealGitHub(cfg)
+    with pytest.raises(GitHubError, match="HTTP 500"):
+        gh.search_open_prs("tok-xxxxxxxxxxxxxxxx", ["alice"])
+    with pytest.raises(GitHubError, match="HTTP 500"):
+        gh.search_open_prs("tok-xxxxxxxxxxxxxxxx", ["alice"])
+    assert n["calls"] == 2
+
+
 def test_real_github_caches_search(cfg, monkeypatch) -> None:
     n = {"calls": 0}
 

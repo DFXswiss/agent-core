@@ -163,6 +163,8 @@ class RealGitHub(GitHub):
                     out.append(row)
         finally:
             pool.shutdown(wait=False, cancel_futures=True)
+        if timed_out and not out:
+            raise GitHubError("PR search timed out")
         if not out and errors:
             raise errors[0]
         out.sort(key=lambda r: (r["org"], r["repo"], -r["number"]))
@@ -171,28 +173,32 @@ class RealGitHub(GitHub):
         return out
 
     def _search_involves(self, token: str, login: str) -> list[dict[str, Any]]:
-        resp = httpx.get(
-            GITHUB_SEARCH_URL,
-            params={
-                "q": f"is:pr is:open involves:{login}",
-                "sort": "updated",
-                "order": "desc",
-                "per_page": 50,
-            },
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
-            timeout=15.0,
-        )
+        try:
+            resp = httpx.get(
+                GITHUB_SEARCH_URL,
+                params={
+                    "q": f"is:pr is:open involves:{login}",
+                    "sort": "updated",
+                    "order": "desc",
+                    "per_page": 50,
+                },
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/vnd.github+json",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                },
+                timeout=15.0,
+            )
+        except httpx.HTTPError as exc:
+            raise GitHubError(f"PR search failed: {exc}") from exc
         if resp.status_code == 422:
             return []
-        if resp.status_code in (401, 403):
-            raise GitHubError(f"PR search failed: HTTP {resp.status_code}")
         if resp.status_code != 200:
             raise GitHubError(f"PR search failed: HTTP {resp.status_code}")
-        body = resp.json()
+        try:
+            body = resp.json()
+        except ValueError as exc:
+            raise GitHubError("PR search failed: invalid JSON") from exc
         items = body.get("items") if isinstance(body, dict) else None
         if not isinstance(items, list):
             return []
