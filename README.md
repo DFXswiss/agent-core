@@ -12,7 +12,7 @@ Image builds on `develop` / `main` push `dfxswiss/agent-core:beta` / `:latest` a
 
 ## Run locally
 
-Create a GitHub OAuth App whose callback is `http://127.0.0.1:8787/auth/github/callback`. The hub requests scopes `read:user` and `repo` so the website can list private open PRs as the signed-in user. Then:
+Create a GitHub OAuth App whose callback is `http://127.0.0.1:8787/auth/github/callback`. The hub requests scope `read:user` so people can sign in. The website shows only the local hub replica — sessions, tasks, agents, pings, devices. Then:
 
 ```bash
 python3 -m venv .venv
@@ -48,8 +48,6 @@ teams:
 ```
 
 Logins are compared in lowercase. A login that appears on no team still signs in and still syncs; they only see themselves.
-
-After GitHub sign-in the website leads with a table of **open pull requests** for everyone you can see (author or assignee): Author, Org, Repo, PR, Description, Status. The rest of the dashboard loads even if GitHub search is slow or fails.
 
 ## Protocol
 
