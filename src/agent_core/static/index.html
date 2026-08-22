@@ -324,7 +324,14 @@
         if (gen !== renderGen) return;
         document.getElementById("signed-out").classList.toggle("hidden", !!user);
         document.getElementById("signed-in").classList.toggle("hidden", !user);
-        if (!user) return;
+        if (!user) {
+          const s = stateInflight; stateInflight = null;
+          const p = prsInflight; prsInflight = null;
+          if (s) s.ctl.abort();
+          if (p) p.ctl.abort();
+          err.hidden = true;
+          return;
+        }
         window.__login = user.login;
         document.getElementById("who").textContent = user.login;
         document.getElementById("team-list").textContent = user.teams.length ? user.teams.join(", ") : "none (self only)";

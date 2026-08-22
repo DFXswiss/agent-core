@@ -199,6 +199,10 @@ def test_index_lists_pr_columns() -> None:
     assert html.index("if (prsInflight)") < html.index('jsonGet("/api/prs"')
     assert "if (stateCtl) stateCtl.abort()" not in html
     assert "if (prsCtl) prsCtl.abort()" not in html
+    signed_out = html.split("if (!user)", 1)[1].split("window.__login", 1)[0]
+    assert "s.ctl.abort()" in signed_out
+    assert "p.ctl.abort()" in signed_out
+    assert "err.hidden = true" in signed_out
     assert "if (gen !== renderGen) return" in html
     assert 'jsonGet("/api/state", stateCtl, 15000)' in html
     assert 'jsonGet("/api/prs", prsCtl, 25000)' in html
