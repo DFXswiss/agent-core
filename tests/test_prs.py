@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from agent_core.github import FakeGitHub, _pr_from_search_item
+import pytest
+
+from agent_core.github import FakeGitHub, GitHubError, RealGitHub, _pr_from_search_item
 from tests.conftest import sign_in
 
 
@@ -228,3 +230,102 @@ def test_index_lists_pr_columns() -> None:
     assert "Timed out loading PRs." in html
     assert "GitHub access is missing" in html
     assert "source === \"none\"" in html or "source === 'none'" in html
+
+
+class _Resp:
+    def __init__(self, status: int, payload: dict) -> None:
+        self.status_code = status
+        self._payload = payload
+
+    def json(self) -> dict:
+        return self._payload
+
+
+def test_real_github_searches_one_login_at_a_time(cfg, monkeypatch) -> None:
+    calls: list[str] = []
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        q = params["q"]
+        calls.append(q)
+        login = q.rsplit("involves:", 1)[-1]
+        return _Resp(
+            200,
+            {
+                "items": [
+                    {
+                        "html_url": f"https://github.com/acme/app/pull/{len(calls)}",
+                        "title": login,
+                        "state": "open",
+                        "draft": False,
+                        "user": {"login": login},
+                    }
+                ]
+            },
+        )
+
+    monkeypatch.setattr("agent_core.github.httpx.get", fake_get)
+    rows = RealGitHub(cfg).search_open_prs("tok-xxxxxxxxxxxxxxxx", ["alice", "bob", "cara"])
+    assert len(calls) == 3
+    assert all(q.startswith("is:pr is:open involves:") and " OR " not in q for q in calls)
+    assert {r["author"] for r in rows} == {"alice", "bob", "cara"}
+
+
+def test_real_github_skips_unsearchable_login(cfg, monkeypatch) -> None:
+    def fake_get(url, params=None, headers=None, timeout=None):
+        login = params["q"].rsplit("involves:", 1)[-1]
+        if login == "bob":
+            return _Resp(422, {"message": "Validation Failed"})
+        return _Resp(
+            200,
+            {
+                "items": [
+                    {
+                        "html_url": "https://github.com/acme/app/pull/7",
+                        "title": "ok",
+                        "state": "open",
+                        "draft": False,
+                        "user": {"login": "alice"},
+                    }
+                ]
+            },
+        )
+
+    monkeypatch.setattr("agent_core.github.httpx.get", fake_get)
+    rows = RealGitHub(cfg).search_open_prs("tok-xxxxxxxxxxxxxxxx", ["alice", "bob"])
+    assert [r["number"] for r in rows] == [7]
+
+
+def test_real_github_401_still_raises(cfg, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "agent_core.github.httpx.get",
+        lambda *a, **k: _Resp(401, {"message": "Bad credentials"}),
+    )
+    with pytest.raises(GitHubError, match="HTTP 401"):
+        RealGitHub(cfg).search_open_prs("tok-xxxxxxxxxxxxxxxx", ["alice"])
+
+
+def test_real_github_caches_search(cfg, monkeypatch) -> None:
+    n = {"calls": 0}
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        n["calls"] += 1
+        return _Resp(
+            200,
+            {
+                "items": [
+                    {
+                        "html_url": "https://github.com/acme/app/pull/1",
+                        "title": "x",
+                        "state": "open",
+                        "draft": False,
+                        "user": {"login": "alice"},
+                    }
+                ]
+            },
+        )
+
+    monkeypatch.setattr("agent_core.github.httpx.get", fake_get)
+    gh = RealGitHub(cfg)
+    assert gh.search_open_prs("tok-xxxxxxxxxxxxxxxx", ["alice"])[0]["number"] == 1
+    assert gh.search_open_prs("tok-xxxxxxxxxxxxxxxx", ["alice"])[0]["number"] == 1
+    assert n["calls"] == 1

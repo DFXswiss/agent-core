@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from time import monotonic
 from typing import Any
 from urllib.parse import urlencode, urlparse
 
@@ -64,8 +66,11 @@ def _pr_from_search_item(item: dict[str, Any]) -> dict[str, Any] | None:
 
 
 class RealGitHub(GitHub):
+    _SEARCH_TTL = 45.0
+
     def __init__(self, cfg: Config) -> None:
         self._cfg = cfg
+        self._pr_cache: dict[tuple[str, tuple[str, ...]], tuple[float, list[dict[str, Any]]]] = {}
 
     def authorize_url(self, state: str, redirect_uri: str) -> str:
         query = urlencode(
@@ -120,41 +125,71 @@ class RealGitHub(GitHub):
                 continue
             seen.add(low)
             unique.append(low)
-        clauses = []
-        for login in unique:
-            clauses.append(f"author:{login}")
-            clauses.append(f"assignee:{login}")
-        q = "is:pr is:open (" + " OR ".join(clauses) + ")"
+        cache_key = (token[-12:], tuple(unique))
+        now = monotonic()
+        hit = self._pr_cache.get(cache_key)
+        if hit is not None and now - hit[0] < self._SEARCH_TTL:
+            return hit[1]
+        out: list[dict[str, Any]] = []
+        seen_keys: set[tuple[str, str, int]] = set()
+        errors: list[GitHubError] = []
+        workers = min(8, len(unique))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futs = [
+                pool.submit(self._search_involves, token, login)
+                for login in unique
+            ]
+            try:
+                for fut in as_completed(futs, timeout=20):
+                    try:
+                        items = fut.result()
+                    except GitHubError as exc:
+                        if "HTTP 401" in str(exc):
+                            raise
+                        errors.append(exc)
+                        continue
+                    for item in items:
+                        row = _pr_from_search_item(item)
+                        if row is None:
+                            continue
+                        key = (row["org"], row["repo"], row["number"])
+                        if key in seen_keys:
+                            continue
+                        seen_keys.add(key)
+                        out.append(row)
+            except TimeoutError:
+                pass
+        if not out and errors:
+            raise errors[0]
+        out.sort(key=lambda r: (r["org"], r["repo"], -r["number"]))
+        self._pr_cache[cache_key] = (now, out)
+        return out
+
+    def _search_involves(self, token: str, login: str) -> list[dict[str, Any]]:
         resp = httpx.get(
             GITHUB_SEARCH_URL,
-            params={"q": q, "sort": "updated", "order": "desc", "per_page": 50},
+            params={
+                "q": f"is:pr is:open involves:{login}",
+                "sort": "updated",
+                "order": "desc",
+                "per_page": 50,
+            },
             headers={
                 "Authorization": f"Bearer {token}",
                 "Accept": "application/vnd.github+json",
                 "X-GitHub-Api-Version": "2022-11-28",
             },
-            timeout=20.0,
+            timeout=15.0,
         )
+        if resp.status_code == 422:
+            return []
         if resp.status_code != 200:
             raise GitHubError(f"PR search failed: HTTP {resp.status_code}")
         body = resp.json()
         items = body.get("items") if isinstance(body, dict) else None
         if not isinstance(items, list):
             return []
-        out: list[dict[str, Any]] = []
-        seen_keys: set[tuple[str, str, int]] = set()
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            row = _pr_from_search_item(item)
-            if row is None:
-                continue
-            key = (row["org"], row["repo"], row["number"])
-            if key in seen_keys:
-                continue
-            seen_keys.add(key)
-            out.append(row)
-        return out
+        return [item for item in items if isinstance(item, dict)]
 
 
 class FakeGitHub(GitHub):
