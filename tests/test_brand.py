@@ -14,25 +14,25 @@ def test_dashboard_html_has_brand_meta(hub: TestClient) -> None:
     assert "__PUBLIC_URL__" not in body
 
 
-def test_dashboard_html_is_dark_mode(hub: TestClient) -> None:
+def test_dashboard_html_has_optional_theme(hub: TestClient) -> None:
     r = hub.get("/")
     assert r.status_code == 200
     body = r.text
     assert 'name="color-scheme"' in body
-    assert 'content="dark"' in body
+    assert 'content="light dark"' in body
+    assert 'id="theme-toggle"' in body
+    assert "Dark mode" in body
+    assert 'localStorage.getItem("agent-theme")' in body
+    assert "html[data-theme=\"dark\"]" in body
+    assert "--bg: #f4f1ea" in body
+    assert "--bg: #161513" in body
+    assert "color-scheme: light" in body
     assert "color-scheme: dark" in body
-    assert "background: #161513" in body
-    assert "#f4f1ea" not in body
-    assert "#efeae0" not in body
-    assert "#f8f4ec" not in body
-    assert "background: #fff" not in body
-    assert "color: #1a1a1a" not in body
-    assert "background: #072440" not in body
-    assert "border: 1px solid #716d64" in body
     pair = hub.get("/pair")
     assert pair.status_code == 200
-    assert 'content="dark"' in pair.text
-    assert "background: #161513" in pair.text
+    assert 'id="theme-toggle"' in pair.text
+    assert "--bg: #f4f1ea" in pair.text
+    assert "--bg: #161513" in pair.text
 
 
 def test_pair_page_has_og_image(hub: TestClient) -> None:
