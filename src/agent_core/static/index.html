@@ -5,8 +5,19 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Agent</title>
   <meta name="description" content="Team session store. Sign in with GitHub.">
-  <meta name="theme-color" content="#161513">
-  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#f4f1ea">
+  <meta name="color-scheme" content="light dark">
+  <script>
+    (function () {
+      try {
+        if (localStorage.getItem("agent-theme") === "dark") {
+          document.documentElement.setAttribute("data-theme", "dark");
+          var m = document.querySelector('meta[name="theme-color"]');
+          if (m) m.setAttribute("content", "#161513");
+        }
+      } catch (e) {}
+    })();
+  </script>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="icon" href="/favicon.ico" sizes="32x32">
   <link rel="apple-touch-icon" href="/apple-touch-icon.png">
@@ -27,43 +38,68 @@
   <meta name="twitter:description" content="Team session store. Sign in with GitHub.">
   <meta name="twitter:image" content="__PUBLIC_URL__/og.png">
   <style>
-    :root { color-scheme: dark; font-family: ui-sans-serif, system-ui, sans-serif; color: #eceae4; background: #161513; }
+    :root {
+      color-scheme: light;
+      --bg: #f4f1ea; --fg: #1a1a1a; --muted: #555;
+      --btn-bg: #1a1a1a; --btn-fg: #fff;
+      --btn-secondary-bg: #fff; --btn-secondary-fg: #1a1a1a; --btn-secondary-border: #ccc;
+      --surface: #fff; --surface-border: #ddd; --table-rule: #eee; --th: #efeae0; --hover: #f8f4ec;
+      --ok: #0b5; --warn: #c60; --bad: #c00;
+      --input-bg: #fff; --input-border: #ccc; --input-fg: #1a1a1a;
+      --term-bg: #1a1a1a; --term-fg: #e8e6e1; --meta: #444;
+      font-family: ui-sans-serif, system-ui, sans-serif; color: var(--fg); background: var(--bg);
+    }
+    html[data-theme="dark"] {
+      color-scheme: dark;
+      --bg: #161513; --fg: #eceae4; --muted: #a8a39a;
+      --btn-bg: #eceae4; --btn-fg: #161513;
+      --btn-secondary-bg: transparent; --btn-secondary-fg: #eceae4; --btn-secondary-border: #716d64;
+      --surface: #1f1e1b; --surface-border: #716d64; --table-rule: #716d64; --th: #1a1916; --hover: #2a2824;
+      --ok: #7dce9a; --warn: #e6b35c; --bad: #f5516c;
+      --input-bg: #1f1e1b; --input-border: #716d64; --input-fg: #eceae4;
+      --term-bg: #0e0d0b; --term-fg: #eceae4; --meta: #a8a39a;
+    }
     body { margin: 24px; max-width: 1100px; }
     h1 { font-size: 1.4rem; margin: 0 0 4px; }
-    .sub { color: #a8a39a; margin-bottom: 16px; }
+    .title-bar { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-bottom: 4px; }
+    .title-bar h1 { margin: 0; }
+    .sub { color: var(--muted); margin-bottom: 16px; }
     .bar { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-bottom: 20px; }
-    button, a.btn { background: #eceae4; color: #161513; border: 0; border-radius: 6px; padding: 8px 14px; text-decoration: none; cursor: pointer; font-size: 0.95rem; }
-    button.secondary { background: transparent; color: #eceae4; border: 1px solid #716d64; }
+    button, a.btn { background: var(--btn-bg); color: var(--btn-fg); border: 0; border-radius: 6px; padding: 8px 14px; text-decoration: none; cursor: pointer; font-size: 0.95rem; }
+    button.secondary { background: var(--btn-secondary-bg); color: var(--btn-secondary-fg); border: 1px solid var(--btn-secondary-border); }
     button:disabled { opacity: 0.45; cursor: not-allowed; }
     .kpis { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
-    .kpi { background: #1f1e1b; border: 1px solid #716d64; border-radius: 8px; padding: 12px 16px; min-width: 140px; }
+    .kpi { background: var(--surface); border: 1px solid var(--surface-border); border-radius: 8px; padding: 12px 16px; min-width: 140px; }
     .kpi b { display: block; font-size: 1.6rem; }
-    table { width: 100%; border-collapse: collapse; background: #1f1e1b; margin-bottom: 24px; }
-    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #716d64; font-size: 0.92rem; }
-    th { background: #1a1916; }
+    table { width: 100%; border-collapse: collapse; background: var(--surface); margin-bottom: 24px; }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--table-rule); font-size: 0.92rem; }
+    th { background: var(--th); }
     tr.session-row { cursor: pointer; }
-    tr.session-row:hover { background: #2a2824; }
-    .working, .implementing { color: #7dce9a; font-weight: 600; }
-    .reviewing, .pr-review { color: #e6b35c; font-weight: 600; }
-    .failed { color: #f5516c; font-weight: 600; }
-    .draft { color: #e6b35c; font-weight: 600; }
-    .open { color: #7dce9a; font-weight: 600; }
-    #err { color: #f5516c; }
+    tr.session-row:hover { background: var(--hover); }
+    .working, .implementing { color: var(--ok); font-weight: 600; }
+    .reviewing, .pr-review { color: var(--warn); font-weight: 600; }
+    .failed { color: var(--bad); font-weight: 600; }
+    .draft { color: var(--warn); font-weight: 600; }
+    .open { color: var(--ok); font-weight: 600; }
+    #err { color: var(--bad); }
     .hidden { display: none; }
-    input, select, textarea { padding: 6px 8px; border: 1px solid #716d64; border-radius: 4px; font: inherit; background: #1f1e1b; color: #eceae4; }
+    input, select, textarea { padding: 6px 8px; border: 1px solid var(--input-border); border-radius: 4px; font: inherit; background: var(--input-bg); color: var(--input-fg); }
     label { display: block; margin: 8px 0; }
     #term {
-      background: #0e0d0b; color: #eceae4; padding: 12px; border-radius: 8px;
+      background: var(--term-bg); color: var(--term-fg); padding: 12px; border-radius: 8px;
       min-height: 200px; max-height: 400px; overflow: auto; white-space: pre-wrap;
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem;
     }
     #session-controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 12px 0; }
-    #session-meta { color: #a8a39a; font-size: 0.92rem; }
-    #device-offline { color: #e6b35c; font-weight: 600; margin: 0; }
+    #session-meta { color: var(--meta); font-size: 0.92rem; }
+    #device-offline { color: var(--warn); font-weight: 600; margin: 0; }
   </style>
 </head>
 <body>
-  <h1>Agent</h1>
+  <div class="title-bar">
+    <h1>Agent</h1>
+    <button type="button" class="secondary" id="theme-toggle" aria-pressed="false">Dark mode</button>
+  </div>
   <p class="sub">Team session store. Sign in with GitHub. <span id="stamp"></span></p>
 
   <div id="signed-out" class="bar">
@@ -133,6 +169,31 @@
     function esc(s) {
       return String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]));
     }
+    (function themeToggle() {
+      const KEY = "agent-theme";
+      const root = document.documentElement;
+      const btn = document.getElementById("theme-toggle");
+      const meta = document.querySelector('meta[name="theme-color"]');
+      function current() {
+        return root.getAttribute("data-theme") === "dark" ? "dark" : "light";
+      }
+      function apply(t) {
+        if (t === "dark") root.setAttribute("data-theme", "dark");
+        else root.removeAttribute("data-theme");
+        if (meta) meta.setAttribute("content", t === "dark" ? "#161513" : "#f4f1ea");
+        if (btn) {
+          btn.setAttribute("aria-pressed", t === "dark" ? "true" : "false");
+        }
+      }
+      apply(current());
+      if (btn) {
+        btn.addEventListener("click", function () {
+          const next = current() === "dark" ? "light" : "dark";
+          try { localStorage.setItem(KEY, next); } catch (e) {}
+          apply(next);
+        });
+      }
+    })();
     const params = new URLSearchParams(location.search);
     const challenge = params.get("challenge");
     if (challenge) {
