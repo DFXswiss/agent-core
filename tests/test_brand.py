@@ -21,12 +21,15 @@ def test_dashboard_html_has_optional_theme(hub: TestClient) -> None:
     assert 'name="color-scheme"' in body
     assert 'content="light dark"' in body
     assert 'id="theme-toggle"' in body
-    assert "Dark mode" in body
+    assert 'class="theme-switch"' in body
+    assert 'role="switch"' in body
+    assert 'aria-label="Dark mode"' in body
     assert "Light mode" not in body
     assert 'localStorage.getItem("agent-theme")' in body
     assert "localStorage.setItem(KEY, next)" in body
     assert "apply(next)" in body
-    assert 'aria-pressed' in body
+    assert "aria-checked" in body
+    assert "theme-switch-thumb" in body
     assert 'content="#f4f1ea"' in body
     assert 'setAttribute("content", "#161513")' in body
     assert "html[data-theme=\"dark\"]" in body
