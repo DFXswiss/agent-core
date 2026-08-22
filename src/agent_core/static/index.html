@@ -6,6 +6,7 @@
   <title>Agent</title>
   <meta name="description" content="Team session store. Sign in with GitHub.">
   <meta name="theme-color" content="#072440">
+  <meta name="color-scheme" content="dark">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="icon" href="/favicon.ico" sizes="32x32">
   <link rel="apple-touch-icon" href="/apple-touch-icon.png">
@@ -26,39 +27,39 @@
   <meta name="twitter:description" content="Team session store. Sign in with GitHub.">
   <meta name="twitter:image" content="__PUBLIC_URL__/og.png">
   <style>
-    :root { font-family: ui-sans-serif, system-ui, sans-serif; color: #1a1a1a; background: #f4f1ea; }
+    :root { color-scheme: dark; font-family: ui-sans-serif, system-ui, sans-serif; color: #e8e6e1; background: #072440; }
     body { margin: 24px; max-width: 1100px; }
     h1 { font-size: 1.4rem; margin: 0 0 4px; }
-    .sub { color: #555; margin-bottom: 16px; }
+    .sub { color: #9bb0c4; margin-bottom: 16px; }
     .bar { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-bottom: 20px; }
-    button, a.btn { background: #1a1a1a; color: #fff; border: 0; border-radius: 6px; padding: 8px 14px; text-decoration: none; cursor: pointer; font-size: 0.95rem; }
-    button.secondary { background: #fff; color: #1a1a1a; border: 1px solid #ccc; }
+    button, a.btn { background: #e8e6e1; color: #072440; border: 0; border-radius: 6px; padding: 8px 14px; text-decoration: none; cursor: pointer; font-size: 0.95rem; }
+    button.secondary { background: transparent; color: #e8e6e1; border: 1px solid #5d7d9c; }
     button:disabled { opacity: 0.45; cursor: not-allowed; }
     .kpis { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
-    .kpi { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 12px 16px; min-width: 140px; }
+    .kpi { background: #0c3258; border: 1px solid #5d7d9c; border-radius: 8px; padding: 12px 16px; min-width: 140px; }
     .kpi b { display: block; font-size: 1.6rem; }
-    table { width: 100%; border-collapse: collapse; background: #fff; margin-bottom: 24px; }
-    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #eee; font-size: 0.92rem; }
-    th { background: #efeae0; }
+    table { width: 100%; border-collapse: collapse; background: #0c3258; margin-bottom: 24px; }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #5d7d9c; font-size: 0.92rem; }
+    th { background: #0a2c4c; }
     tr.session-row { cursor: pointer; }
-    tr.session-row:hover { background: #f8f4ec; }
-    .working, .implementing { color: #0b5; font-weight: 600; }
-    .reviewing, .pr-review { color: #c60; font-weight: 600; }
-    .failed { color: #c00; font-weight: 600; }
-    .draft { color: #c60; font-weight: 600; }
-    .open { color: #0b5; font-weight: 600; }
-    #err { color: #c00; }
+    tr.session-row:hover { background: #0f3a64; }
+    .working, .implementing { color: #3dcc7a; font-weight: 600; }
+    .reviewing, .pr-review { color: #f0a000; font-weight: 600; }
+    .failed { color: #ff6b6b; font-weight: 600; }
+    .draft { color: #f0a000; font-weight: 600; }
+    .open { color: #3dcc7a; font-weight: 600; }
+    #err { color: #ff6b6b; }
     .hidden { display: none; }
-    input, select, textarea { padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px; font: inherit; }
+    input, select, textarea { padding: 6px 8px; border: 1px solid #5d7d9c; border-radius: 4px; font: inherit; background: #0c3258; color: #e8e6e1; }
     label { display: block; margin: 8px 0; }
     #term {
-      background: #1a1a1a; color: #e8e6e1; padding: 12px; border-radius: 8px;
+      background: #051828; color: #e8e6e1; padding: 12px; border-radius: 8px;
       min-height: 200px; max-height: 400px; overflow: auto; white-space: pre-wrap;
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem;
     }
     #session-controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 12px 0; }
-    #session-meta { color: #444; font-size: 0.92rem; }
-    #device-offline { color: #c60; font-weight: 600; margin: 0; }
+    #session-meta { color: #9bb0c4; font-size: 0.92rem; }
+    #device-offline { color: #f0a000; font-weight: 600; margin: 0; }
   </style>
 </head>
 <body>
