@@ -202,19 +202,23 @@ def test_index_lists_pr_columns() -> None:
     assert html.index('k-people").textContent') < html.index("kickState();")
     assert html.index("kickState();") < html.index("kickPrs();")
     assert "if (!meInflight)" in render_fn
+    assert "await meInflight" in render_fn
+    assert "meInflight = me().finally" in render_fn
+    after_me = render_fn.split("await meInflight", 1)[1]
+    assert "if (gen !== renderGen) return" in after_me.split("catch", 1)[0]
     assert html.index("if (stateInflight)") < html.index('jsonGet("/api/state"')
     assert html.index("if (prsInflight)") < html.index('jsonGet("/api/prs"')
+    assert "stateInflight.gen !== gen" in html
+    assert "prsInflight.gen !== gen" in html
     assert "if (stateCtl) stateCtl.abort()" not in html
     assert "if (prsCtl) prsCtl.abort()" not in html
     signed_out = html.split("if (!user)", 1)[1].split("window.__login", 1)[0]
     assert "s.ctl.abort()" in signed_out
     assert "p.ctl.abort()" in signed_out
     assert "err.hidden = true" in signed_out
-    assert "if (gen !== renderGen) return" in html
     assert 'jsonGet("/api/state", stateCtl, 15000)' in html
     assert 'jsonGet("/api/prs", prsCtl, 25000)' in html
-    assert "await stateP" not in html
-    assert "await prsP" not in html
+    assert "Timed out loading sessions." in html
     assert "Timed out loading PRs." in html
     assert "GitHub access is missing" in html
     assert "source === \"none\"" in html or "source === 'none'" in html
