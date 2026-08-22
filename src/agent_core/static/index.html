@@ -178,6 +178,7 @@
       }).finally(() => clearTimeout(t));
     }
 
+    // Tables render GET /api/state as-is (newest first). Do not reverse or append.
     function fill(id, rows, cols) {
       const tb = document.querySelector("#" + id + " tbody");
       tb.innerHTML = rows.map(r => "<tr>" + cols.map(c => {
