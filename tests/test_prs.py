@@ -248,12 +248,13 @@ def test_real_github_searches_one_login_at_a_time(cfg, monkeypatch) -> None:
         q = params["q"]
         calls.append(q)
         login = q.rsplit("involves:", 1)[-1]
+        n = {"alice": 1, "bob": 2, "cara": 3}[login]
         return _Resp(
             200,
             {
                 "items": [
                     {
-                        "html_url": f"https://github.com/acme/app/pull/{len(calls)}",
+                        "html_url": f"https://github.com/acme/app/pull/{n}",
                         "title": login,
                         "state": "open",
                         "draft": False,
@@ -301,6 +302,20 @@ def test_real_github_401_still_raises(cfg, monkeypatch) -> None:
         lambda *a, **k: _Resp(401, {"message": "Bad credentials"}),
     )
     with pytest.raises(GitHubError, match="HTTP 401"):
+        RealGitHub(cfg).search_open_prs("tok-xxxxxxxxxxxxxxxx", ["alice"])
+
+
+def test_real_github_blank_logins_are_empty(cfg, monkeypatch) -> None:
+    monkeypatch.setattr("agent_core.github.httpx.get", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no http")))
+    assert RealGitHub(cfg).search_open_prs("tok-xxxxxxxxxxxxxxxx", ["", "  "]) == []
+
+
+def test_real_github_403_raises(cfg, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "agent_core.github.httpx.get",
+        lambda *a, **k: _Resp(403, {"message": "rate limit"}),
+    )
+    with pytest.raises(GitHubError, match="HTTP 403"):
         RealGitHub(cfg).search_open_prs("tok-xxxxxxxxxxxxxxxx", ["alice"])
 
 

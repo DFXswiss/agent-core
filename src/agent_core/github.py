@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from time import monotonic
 from typing import Any
@@ -125,6 +125,8 @@ class RealGitHub(GitHub):
                 continue
             seen.add(low)
             unique.append(low)
+        if not unique:
+            return []
         cache_key = (token[-12:], tuple(unique))
         now = monotonic()
         hit = self._pr_cache.get(cache_key)
@@ -134,35 +136,38 @@ class RealGitHub(GitHub):
         seen_keys: set[tuple[str, str, int]] = set()
         errors: list[GitHubError] = []
         workers = min(8, len(unique))
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futs = [
-                pool.submit(self._search_involves, token, login)
-                for login in unique
-            ]
-            try:
-                for fut in as_completed(futs, timeout=20):
-                    try:
-                        items = fut.result()
-                    except GitHubError as exc:
-                        if "HTTP 401" in str(exc):
-                            raise
-                        errors.append(exc)
+        pool = ThreadPoolExecutor(max_workers=workers)
+        try:
+            futs = [pool.submit(self._search_involves, token, login) for login in unique]
+            done, not_done = wait(futs, timeout=15)
+            timed_out = bool(not_done)
+            for fut in not_done:
+                fut.cancel()
+            for fut in done:
+                try:
+                    items = fut.result()
+                except GitHubError as exc:
+                    text = str(exc)
+                    if "HTTP 401" in text or "HTTP 403" in text:
+                        raise
+                    errors.append(exc)
+                    continue
+                for item in items:
+                    row = _pr_from_search_item(item)
+                    if row is None:
                         continue
-                    for item in items:
-                        row = _pr_from_search_item(item)
-                        if row is None:
-                            continue
-                        key = (row["org"], row["repo"], row["number"])
-                        if key in seen_keys:
-                            continue
-                        seen_keys.add(key)
-                        out.append(row)
-            except TimeoutError:
-                pass
+                    key = (row["org"], row["repo"], row["number"])
+                    if key in seen_keys:
+                        continue
+                    seen_keys.add(key)
+                    out.append(row)
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
         if not out and errors:
             raise errors[0]
         out.sort(key=lambda r: (r["org"], r["repo"], -r["number"]))
-        self._pr_cache[cache_key] = (now, out)
+        if not timed_out and not errors:
+            self._pr_cache[cache_key] = (now, out)
         return out
 
     def _search_involves(self, token: str, login: str) -> list[dict[str, Any]]:
@@ -183,6 +188,8 @@ class RealGitHub(GitHub):
         )
         if resp.status_code == 422:
             return []
+        if resp.status_code in (401, 403):
+            raise GitHubError(f"PR search failed: HTTP {resp.status_code}")
         if resp.status_code != 200:
             raise GitHubError(f"PR search failed: HTTP {resp.status_code}")
         body = resp.json()
