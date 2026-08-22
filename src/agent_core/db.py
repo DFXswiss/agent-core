@@ -59,6 +59,12 @@ CREATE TABLE IF NOT EXISTS device_subscription (
   FOREIGN KEY (device_id) REFERENCES device(id)
 );
 
+CREATE TABLE IF NOT EXISTS oauth_token (
+  github_login TEXT PRIMARY KEY,
+  token TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS event_origin_idx ON ledger_event (origin_device_id, origin_seq);
 CREATE INDEX IF NOT EXISTS replica_login_idx ON row_replica (github_login, table_name);
 CREATE INDEX IF NOT EXISTS device_login_idx ON device (github_login);
@@ -138,6 +144,33 @@ class Store:
             except Exception:
                 self._conn.rollback()
                 raise
+
+    def put_oauth_token(self, github_login: str, token: str) -> None:
+        self.execute(
+            "INSERT INTO oauth_token (github_login, token, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(github_login) DO UPDATE SET token = excluded.token, updated_at = excluded.updated_at",
+            (github_login, token, utcnow()),
+        )
+
+    def get_oauth_token(self, github_login: str) -> str:
+        row = self.query_one("SELECT token FROM oauth_token WHERE github_login = ?", (github_login,))
+        if row is None:
+            return ""
+        token = row["token"]
+        return token if isinstance(token, str) else ""
+
+    def delete_oauth_token(self, github_login: str) -> None:
+        self.execute("DELETE FROM oauth_token WHERE github_login = ?", (github_login,))
+
+    def all_oauth_tokens(self) -> list[tuple[str, str]]:
+        rows = self.query("SELECT github_login, token FROM oauth_token")
+        out: list[tuple[str, str]] = []
+        for row in rows:
+            login = row["github_login"]
+            token = row["token"]
+            if isinstance(login, str) and isinstance(token, str) and login and token:
+                out.append((login, token))
+        return out
 
 
 def row_dict(row: sqlite3.Row) -> dict[str, Any]:

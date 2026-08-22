@@ -60,6 +60,8 @@ class Hub:
         self.terminal_rings: dict[str, list[dict[str, Any]]] = {}
         self.terminal_queues: list[tuple[str, str, asyncio.Queue[dict[str, Any]]]] = []
         self.github_tokens: dict[str, str] = {}
+        for login, token in self.store.all_oauth_tokens():
+            self.github_tokens[login] = token
 
     def visible(self, login: str) -> set[str]:
         return visible_logins(login, self.teams)
@@ -188,6 +190,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         request.session["login"] = user.login
         if user.token:
             hub.github_tokens[user.login] = user.token
+            hub.store.put_oauth_token(user.login, user.token)
         dest = request.session.pop("after_login", "/")
         if not isinstance(dest, str) or not dest.startswith("/"):
             dest = "/"
@@ -197,6 +200,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
     def auth_logout(request: Request) -> JSONResponse:
         login = request.session.get("login")
         if isinstance(login, str) and login:
+            hub.store.delete_oauth_token(login)
             hub.github_tokens.pop(login, None)
         request.session.clear()
         return JSONResponse({"ok": True})
@@ -375,11 +379,20 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         allowed = sorted(hub.visible(login))
         token = hub.github_tokens.get(login, "")
         if token == "":
+            token = hub.store.get_oauth_token(login)
+            if token:
+                hub.github_tokens[login] = token
+        if token == "":
             return {"generated_at": utcnow(), "prs": [], "source": "none"}
         try:
             prs = hub.github.search_open_prs(token, allowed)
         except GitHubError as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
+            text = str(exc)
+            if "HTTP 401" in text:
+                hub.store.delete_oauth_token(login)
+                hub.github_tokens.pop(login, None)
+                return {"generated_at": utcnow(), "prs": [], "source": "none"}
+            raise HTTPException(status_code=502, detail=text) from exc
         truncated = len(prs) >= 50
         return {"generated_at": utcnow(), "prs": prs, "source": "github", "truncated": truncated}
 
