@@ -215,6 +215,10 @@ def test_index_lists_pr_columns() -> None:
     switch_fn = html.split("window.__login !== user.login", 1)[1].split("window.__login = user.login", 1)[0]
     assert "abortHubFetches()" in switch_fn
     assert "clearHubTables()" in switch_fn
+    clear_fn = html.split("function clearHubTables()", 1)[1].split("function jsonGet", 1)[0]
+    assert 'id="prs-sub"' in html
+    assert "prs-sub" in clear_fn
+    assert "Open PRs authored or assigned to people you can see." in clear_fn
     catch_fn = html.split("async function render()", 1)[1].split("function kickState()", 1)[0].split("} catch (e)", 1)[1]
     assert "abortHubFetches()" in catch_fn
     assert "err.hidden = false" in catch_fn
