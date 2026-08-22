@@ -148,6 +148,34 @@ def test_auth_me_has_no_token(hub) -> None:
     me = hub.get("/auth/me").json()
     assert set(me) == {"login", "visible", "teams"}
     assert "token" not in me and "github_token" not in me
+    cookie = ";".join(f"{k}={v}" for k, v in hub.cookies.items())
+    assert "tok-alice" not in cookie
+
+
+def test_logout_drops_token(hub, github: FakeGitHub) -> None:
+    github._prs = [
+        {
+            "author": "alice",
+            "org": "acme",
+            "repo": "app",
+            "number": 7,
+            "title": "Fix login",
+            "status": "open",
+            "url": "https://github.com/acme/app/pull/7",
+        }
+    ]
+    sign_in(hub, "code-alice")
+    assert hub.get("/api/prs").json()["source"] == "github"
+    hub.post("/auth/logout")
+    assert hub.get("/api/prs").status_code == 401
+
+
+def test_expired_github_token_asks_reauth(hub, github: FakeGitHub) -> None:
+    sign_in(hub, "code-alice")
+    github.search_status = 401
+    body = hub.get("/api/prs").json()
+    assert body["source"] == "none"
+    assert body["prs"] == []
 
 
 def test_index_lists_pr_columns() -> None:

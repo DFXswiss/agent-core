@@ -165,6 +165,7 @@ class FakeGitHub(GitHub):
             raise GitHubError("FakeGitHub requires at least one code")
         self._codes = {k: v.strip().lower() for k, v in codes.items()}
         self._prs = list(prs or [])
+        self.search_status = 200
 
     def authorize_url(self, state: str, redirect_uri: str) -> str:
         return f"https://github.test/login/oauth/authorize?state={state}&redirect_uri={redirect_uri}"
@@ -176,6 +177,8 @@ class FakeGitHub(GitHub):
         return GitHubUser(login=login, token="tok-" + login)
 
     def search_open_prs(self, token: str, logins: list[str]) -> list[dict[str, Any]]:
+        if self.search_status in (401, 403):
+            raise GitHubError(f"PR search failed: HTTP {self.search_status}")
         if token == "" or not token.startswith("tok-"):
             return []
         allowed = {m.strip().lower() for m in logins}

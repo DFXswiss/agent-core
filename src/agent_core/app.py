@@ -200,8 +200,8 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
     def auth_logout(request: Request) -> JSONResponse:
         login = request.session.get("login")
         if isinstance(login, str) and login:
-            hub.github_tokens.pop(login, None)
             hub.store.delete_oauth_token(login)
+            hub.github_tokens.pop(login, None)
         request.session.clear()
         return JSONResponse({"ok": True})
 
@@ -387,7 +387,12 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         try:
             prs = hub.github.search_open_prs(token, allowed)
         except GitHubError as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
+            text = str(exc)
+            if "HTTP 401" in text or "HTTP 403" in text:
+                hub.store.delete_oauth_token(login)
+                hub.github_tokens.pop(login, None)
+                return {"generated_at": utcnow(), "prs": [], "source": "none"}
+            raise HTTPException(status_code=502, detail=text) from exc
         truncated = len(prs) >= 50
         return {"generated_at": utcnow(), "prs": prs, "source": "github", "truncated": truncated}
 
