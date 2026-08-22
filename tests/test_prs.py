@@ -201,10 +201,7 @@ def test_index_lists_pr_columns() -> None:
     assert "await kickPrs" not in render_fn
     assert html.index('k-people").textContent') < html.index("kickState();")
     assert html.index("kickState();") < html.index("kickPrs();")
-    assert "if (!meInflight)" in render_fn
-    assert "await meInflight" in render_fn
-    assert "meInflight = me().finally" in render_fn
-    after_me = render_fn.split("await meInflight", 1)[1]
+    after_me = render_fn.split("await me()", 1)[1]
     assert "if (gen !== renderGen) return" in after_me.split("catch", 1)[0]
     assert html.index("if (stateInflight)") < html.index('jsonGet("/api/state"')
     assert html.index("if (prsInflight)") < html.index('jsonGet("/api/prs"')
@@ -215,7 +212,9 @@ def test_index_lists_pr_columns() -> None:
     signed_out = html.split("if (!user)", 1)[1].split("window.__login", 1)[0]
     assert "abortHubFetches()" in signed_out
     assert "err.hidden = true" in signed_out
-    assert "window.__login !== user.login) abortHubFetches()" in html
+    switch_fn = html.split("window.__login !== user.login", 1)[1].split("window.__login = user.login", 1)[0]
+    assert "abortHubFetches()" in switch_fn
+    assert "clearHubTables()" in switch_fn
     catch_fn = html.split("async function render()", 1)[1].split("function kickState()", 1)[0].split("} catch (e)", 1)[1]
     assert "abortHubFetches()" in catch_fn
     assert "err.hidden = false" in catch_fn

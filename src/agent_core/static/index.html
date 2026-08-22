@@ -146,7 +146,6 @@
     let termEs = null;
     let openCanControl = false;
     let renderGen = 0;
-    let meInflight = null;
     let stateInflight = null;
     let prsInflight = null;
     let stateGen = 0;
@@ -164,6 +163,20 @@
       const p = prsInflight; prsInflight = null;
       if (s) s.ctl.abort();
       if (p) p.ctl.abort();
+    }
+
+    function clearHubTables() {
+      document.getElementById("k-tasks").textContent = "–";
+      document.getElementById("k-agents").textContent = "–";
+      document.getElementById("k-pings").textContent = "–";
+      document.getElementById("k-prs").textContent = "–";
+      document.getElementById("stamp").textContent = "";
+      fillSessions([]);
+      fill("tasks", [], ["_github_login", "title", "state", "current_round", "workflow"]);
+      fill("pings", [], ["from_login", "to_login", "kind", "task_id", "acked_at", "_ack"]);
+      fill("devices", [], ["github_login", "name", "id", "created_at"]);
+      document.querySelector("#prs tbody").innerHTML = "<tr><td colspan='6'>—</td></tr>";
+      closeSessionDetail();
     }
 
     function jsonGet(url, ctl, ms) {
@@ -328,8 +341,7 @@
       const gen = ++renderGen;
       const err = document.getElementById("err");
       try {
-        if (!meInflight) meInflight = me().finally(() => { meInflight = null; });
-        const user = await meInflight;
+        const user = await me();
         if (gen !== renderGen) return;
         document.getElementById("signed-out").classList.toggle("hidden", !!user);
         document.getElementById("signed-in").classList.toggle("hidden", !user);
@@ -338,7 +350,10 @@
           err.hidden = true;
           return;
         }
-        if (window.__login && window.__login !== user.login) abortHubFetches();
+        if (window.__login && window.__login !== user.login) {
+          abortHubFetches();
+          clearHubTables();
+        }
         window.__login = user.login;
         document.getElementById("who").textContent = user.login;
         document.getElementById("team-list").textContent = user.teams.length ? user.teams.join(", ") : "none (self only)";
