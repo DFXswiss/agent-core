@@ -5,7 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Agent</title>
   <meta name="description" content="Team session store. Sign in with GitHub.">
-  <meta name="theme-color" content="#072440">
+  <meta name="theme-color" content="#161513">
+  <meta name="color-scheme" content="dark">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="icon" href="/favicon.ico" sizes="32x32">
   <link rel="apple-touch-icon" href="/apple-touch-icon.png">
@@ -26,39 +27,39 @@
   <meta name="twitter:description" content="Team session store. Sign in with GitHub.">
   <meta name="twitter:image" content="__PUBLIC_URL__/og.png">
   <style>
-    :root { font-family: ui-sans-serif, system-ui, sans-serif; color: #1a1a1a; background: #f4f1ea; }
+    :root { color-scheme: dark; font-family: ui-sans-serif, system-ui, sans-serif; color: #eceae4; background: #161513; }
     body { margin: 24px; max-width: 1100px; }
     h1 { font-size: 1.4rem; margin: 0 0 4px; }
-    .sub { color: #555; margin-bottom: 16px; }
+    .sub { color: #a8a39a; margin-bottom: 16px; }
     .bar { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-bottom: 20px; }
-    button, a.btn { background: #1a1a1a; color: #fff; border: 0; border-radius: 6px; padding: 8px 14px; text-decoration: none; cursor: pointer; font-size: 0.95rem; }
-    button.secondary { background: #fff; color: #1a1a1a; border: 1px solid #ccc; }
+    button, a.btn { background: #eceae4; color: #161513; border: 0; border-radius: 6px; padding: 8px 14px; text-decoration: none; cursor: pointer; font-size: 0.95rem; }
+    button.secondary { background: transparent; color: #eceae4; border: 1px solid #716d64; }
     button:disabled { opacity: 0.45; cursor: not-allowed; }
     .kpis { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
-    .kpi { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 12px 16px; min-width: 140px; }
+    .kpi { background: #1f1e1b; border: 1px solid #716d64; border-radius: 8px; padding: 12px 16px; min-width: 140px; }
     .kpi b { display: block; font-size: 1.6rem; }
-    table { width: 100%; border-collapse: collapse; background: #fff; margin-bottom: 24px; }
-    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #eee; font-size: 0.92rem; }
-    th { background: #efeae0; }
+    table { width: 100%; border-collapse: collapse; background: #1f1e1b; margin-bottom: 24px; }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #716d64; font-size: 0.92rem; }
+    th { background: #1a1916; }
     tr.session-row { cursor: pointer; }
-    tr.session-row:hover { background: #f8f4ec; }
-    .working, .implementing { color: #0b5; font-weight: 600; }
-    .reviewing, .pr-review { color: #c60; font-weight: 600; }
-    .failed { color: #c00; font-weight: 600; }
-    .draft { color: #c60; font-weight: 600; }
-    .open { color: #0b5; font-weight: 600; }
-    #err { color: #c00; }
+    tr.session-row:hover { background: #2a2824; }
+    .working, .implementing { color: #7dce9a; font-weight: 600; }
+    .reviewing, .pr-review { color: #e6b35c; font-weight: 600; }
+    .failed { color: #f5516c; font-weight: 600; }
+    .draft { color: #e6b35c; font-weight: 600; }
+    .open { color: #7dce9a; font-weight: 600; }
+    #err { color: #f5516c; }
     .hidden { display: none; }
-    input, select, textarea { padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px; font: inherit; }
+    input, select, textarea { padding: 6px 8px; border: 1px solid #716d64; border-radius: 4px; font: inherit; background: #1f1e1b; color: #eceae4; }
     label { display: block; margin: 8px 0; }
     #term {
-      background: #1a1a1a; color: #e8e6e1; padding: 12px; border-radius: 8px;
+      background: #0e0d0b; color: #eceae4; padding: 12px; border-radius: 8px;
       min-height: 200px; max-height: 400px; overflow: auto; white-space: pre-wrap;
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem;
     }
     #session-controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 12px 0; }
-    #session-meta { color: #444; font-size: 0.92rem; }
-    #device-offline { color: #c60; font-weight: 600; margin: 0; }
+    #session-meta { color: #a8a39a; font-size: 0.92rem; }
+    #device-offline { color: #e6b35c; font-weight: 600; margin: 0; }
   </style>
 </head>
 <body>
@@ -177,6 +178,7 @@
       }).finally(() => clearTimeout(t));
     }
 
+    // Tables render GET /api/state as-is (newest first). Do not reverse or append.
     function fill(id, rows, cols) {
       const tb = document.querySelector("#" + id + " tbody");
       tb.innerHTML = rows.map(r => "<tr>" + cols.map(c => {
