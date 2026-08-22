@@ -155,7 +155,7 @@
     }
 
     async function state() {
-      const res = await fetch("/api/state");
+      const res = await fetch("/api/state", { signal: AbortSignal.timeout(15000) });
       if (!res.ok) throw new Error("HTTP " + res.status);
       return res.json();
     }
@@ -327,8 +327,16 @@
         window.__login = user.login;
         document.getElementById("who").textContent = user.login;
         document.getElementById("team-list").textContent = user.teams.length ? user.teams.join(", ") : "none (self only)";
+        document.getElementById("k-people").textContent = (user.visible || []).length;
         if (challenge) document.getElementById("pair-box").classList.remove("hidden");
+      } catch (e) {
+        err.hidden = false;
+        err.textContent = String(e);
+        return;
+      }
+      try {
         const data = await state();
+        if (gen !== renderGen) return;
         err.hidden = true;
         document.getElementById("stamp").textContent = data.generated_at;
         const tasks = (data.task || []).filter(t => t.state !== "done" && t.state !== "failed");
@@ -344,9 +352,9 @@
         fill("pings", data.pings || [], ["from_login", "to_login", "kind", "task_id", "acked_at", "_ack"]);
         fill("devices", (data.devices || []).filter(d => !d.revoked_at), ["github_login", "name", "id", "created_at"]);
       } catch (e) {
+        if (gen !== renderGen) return;
         err.hidden = false;
         err.textContent = String(e);
-        return;
       }
       try {
         const prData = await prs();
