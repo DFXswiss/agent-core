@@ -215,6 +215,7 @@ def test_index_lists_pr_columns() -> None:
     signed_out = html.split("if (!user)", 1)[1].split("window.__login", 1)[0]
     assert "abortHubFetches()" in signed_out
     assert "err.hidden = true" in signed_out
+    assert "window.__login !== user.login) abortHubFetches()" in html
     catch_fn = html.split("async function render()", 1)[1].split("function kickState()", 1)[0].split("} catch (e)", 1)[1]
     assert "abortHubFetches()" in catch_fn
     assert "err.hidden = false" in catch_fn

@@ -338,6 +338,7 @@
           err.hidden = true;
           return;
         }
+        if (window.__login && window.__login !== user.login) abortHubFetches();
         window.__login = user.login;
         document.getElementById("who").textContent = user.login;
         document.getElementById("team-list").textContent = user.teams.length ? user.teams.join(", ") : "none (self only)";
