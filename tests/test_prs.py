@@ -213,9 +213,11 @@ def test_index_lists_pr_columns() -> None:
     assert "if (stateCtl) stateCtl.abort()" not in html
     assert "if (prsCtl) prsCtl.abort()" not in html
     signed_out = html.split("if (!user)", 1)[1].split("window.__login", 1)[0]
-    assert "s.ctl.abort()" in signed_out
-    assert "p.ctl.abort()" in signed_out
+    assert "abortHubFetches()" in signed_out
     assert "err.hidden = true" in signed_out
+    catch_fn = html.split("async function render()", 1)[1].split("function kickState()", 1)[0].split("} catch (e)", 1)[1]
+    assert "abortHubFetches()" in catch_fn
+    assert "err.hidden = false" in catch_fn
     assert 'jsonGet("/api/state", stateCtl, 15000)' in html
     assert 'jsonGet("/api/prs", prsCtl, 25000)' in html
     assert "Timed out loading sessions." in html

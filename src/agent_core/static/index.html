@@ -159,6 +159,13 @@
       return res.json();
     }
 
+    function abortHubFetches() {
+      const s = stateInflight; stateInflight = null;
+      const p = prsInflight; prsInflight = null;
+      if (s) s.ctl.abort();
+      if (p) p.ctl.abort();
+    }
+
     function jsonGet(url, ctl, ms) {
       const t = setTimeout(() => ctl.abort(), ms);
       return fetch(url, { signal: ctl.signal }).then(res => {
@@ -327,10 +334,7 @@
         document.getElementById("signed-out").classList.toggle("hidden", !!user);
         document.getElementById("signed-in").classList.toggle("hidden", !user);
         if (!user) {
-          const s = stateInflight; stateInflight = null;
-          const p = prsInflight; prsInflight = null;
-          if (s) s.ctl.abort();
-          if (p) p.ctl.abort();
+          abortHubFetches();
           err.hidden = true;
           return;
         }
@@ -341,6 +345,7 @@
         if (challenge) document.getElementById("pair-box").classList.remove("hidden");
       } catch (e) {
         if (gen !== renderGen) return;
+        abortHubFetches();
         err.hidden = false;
         err.textContent = String(e);
         return;
