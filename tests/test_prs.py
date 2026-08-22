@@ -193,9 +193,12 @@ def test_index_lists_pr_columns() -> None:
     assert 'id="prs"' in html
     assert html.index('id="prs"') < html.index('id="sessions"')
     assert html.index('id="err"') < html.index('id="signed-in"')
-    assert html.index("const data = await state()") < html.index("await prs()")
-    assert html.index('k-people").textContent') < html.index("await state()")
+    assert html.index('k-people").textContent') < html.index('jsonGet("/api/state"')
+    assert html.index('const prsP = jsonGet("/api/prs"') < html.index("await stateP")
+    assert html.index("const prsP = jsonGet") < html.index("await prsP")
     assert "if (gen !== renderGen) return" in html
-    assert 'AbortSignal.timeout(15000)' in html
+    assert "jsonGet(\"/api/state\", stateCtl, 15000)" in html
+    err_catch = html.split("Timed out loading sessions.", 1)[1]
+    assert "await prsP" in err_catch
     assert "GitHub access is missing" in html
     assert "source === \"none\"" in html or "source === 'none'" in html

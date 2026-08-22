@@ -146,6 +146,8 @@
     let termEs = null;
     let openCanControl = false;
     let renderGen = 0;
+    let stateCtl = null;
+    let prsCtl = null;
 
     async function me() {
       const res = await fetch("/auth/me");
@@ -154,16 +156,12 @@
       return res.json();
     }
 
-    async function state() {
-      const res = await fetch("/api/state", { signal: AbortSignal.timeout(15000) });
-      if (!res.ok) throw new Error("HTTP " + res.status);
-      return res.json();
-    }
-
-    async function prs() {
-      const res = await fetch("/api/prs", { signal: AbortSignal.timeout(25000) });
-      if (!res.ok) throw new Error("HTTP " + res.status);
-      return res.json();
+    function jsonGet(url, ctl, ms) {
+      const t = setTimeout(() => ctl.abort(), ms);
+      return fetch(url, { signal: ctl.signal }).then(res => {
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        return res.json();
+      }).finally(() => clearTimeout(t));
     }
 
     function fillPrs(rows, source) {
@@ -318,9 +316,14 @@
 
     async function render() {
       const gen = ++renderGen;
+      if (stateCtl) stateCtl.abort();
+      if (prsCtl) prsCtl.abort();
+      stateCtl = new AbortController();
+      prsCtl = new AbortController();
       const err = document.getElementById("err");
       try {
         const user = await me();
+        if (gen !== renderGen) return;
         document.getElementById("signed-out").classList.toggle("hidden", !!user);
         document.getElementById("signed-in").classList.toggle("hidden", !user);
         if (!user) return;
@@ -330,12 +333,15 @@
         document.getElementById("k-people").textContent = (user.visible || []).length;
         if (challenge) document.getElementById("pair-box").classList.remove("hidden");
       } catch (e) {
+        if (gen !== renderGen) return;
         err.hidden = false;
         err.textContent = String(e);
         return;
       }
+      const stateP = jsonGet("/api/state", stateCtl, 15000);
+      const prsP = jsonGet("/api/prs", prsCtl, 25000);
       try {
-        const data = await state();
+        const data = await stateP;
         if (gen !== renderGen) return;
         err.hidden = true;
         document.getElementById("stamp").textContent = data.generated_at;
@@ -354,10 +360,10 @@
       } catch (e) {
         if (gen !== renderGen) return;
         err.hidden = false;
-        err.textContent = String(e);
+        err.textContent = e.name === "AbortError" ? "Timed out loading sessions." : String(e);
       }
       try {
-        const prData = await prs();
+        const prData = await prsP;
         if (gen !== renderGen) return;
         const openPrs = prData.prs || [];
         document.getElementById("k-prs").textContent = openPrs.length;
@@ -365,7 +371,7 @@
       } catch (e) {
         if (gen !== renderGen) return;
         document.getElementById("k-prs").textContent = "–";
-        document.getElementById("prs-sub").textContent = String(e);
+        document.getElementById("prs-sub").textContent = e.name === "AbortError" ? "Timed out loading PRs." : String(e);
         document.querySelector("#prs tbody").innerHTML = "<tr><td colspan='6'>—</td></tr>";
       }
     }
