@@ -388,7 +388,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
             prs = hub.github.search_open_prs(token, allowed)
         except GitHubError as exc:
             text = str(exc)
-            if "HTTP 401" in text or "HTTP 403" in text:
+            if "HTTP 401" in text:
                 hub.store.delete_oauth_token(login)
                 hub.github_tokens.pop(login, None)
                 return {"generated_at": utcnow(), "prs": [], "source": "none"}

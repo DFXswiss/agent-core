@@ -152,7 +152,7 @@ def test_auth_me_has_no_token(hub) -> None:
     assert "tok-alice" not in cookie
 
 
-def test_logout_drops_token(hub, github: FakeGitHub) -> None:
+def test_logout_drops_token(hub, github: FakeGitHub, cfg) -> None:
     github._prs = [
         {
             "author": "alice",
@@ -168,6 +168,10 @@ def test_logout_drops_token(hub, github: FakeGitHub) -> None:
     assert hub.get("/api/prs").json()["source"] == "github"
     hub.post("/auth/logout")
     assert hub.get("/api/prs").status_code == 401
+    from agent_core.db import Store
+
+    store = Store(cfg.database)
+    assert store.get_oauth_token("alice") == ""
 
 
 def test_expired_github_token_asks_reauth(hub, github: FakeGitHub) -> None:
@@ -176,6 +180,8 @@ def test_expired_github_token_asks_reauth(hub, github: FakeGitHub) -> None:
     body = hub.get("/api/prs").json()
     assert body["source"] == "none"
     assert body["prs"] == []
+    github.search_status = 200
+    assert hub.get("/api/prs").json()["source"] == "none"
 
 
 def test_index_lists_pr_columns() -> None:
