@@ -193,8 +193,38 @@ def test_index_lists_pr_columns() -> None:
     assert 'id="prs"' in html
     assert html.index('id="prs"') < html.index('id="sessions"')
     assert html.index('id="err"') < html.index('id="signed-in"')
-    assert html.index("const data = await state()") < html.index("await prs()")
-    assert html.index('k-people").textContent') < html.index("await prs()")
-    assert "if (gen !== renderGen) return" in html
+    render_fn = html.split("async function render()", 1)[1].split("function kickState()", 1)[0]
+    assert 'k-people").textContent' in render_fn
+    assert "kickState();" in render_fn
+    assert "kickPrs();" in render_fn
+    assert "await kickState" not in render_fn
+    assert "await kickPrs" not in render_fn
+    assert html.index('k-people").textContent') < html.index("kickState();")
+    assert html.index("kickState();") < html.index("kickPrs();")
+    after_me = render_fn.split("await me()", 1)[1]
+    assert "if (gen !== renderGen) return" in after_me.split("catch", 1)[0]
+    assert html.index("if (stateInflight)") < html.index('jsonGet("/api/state"')
+    assert html.index("if (prsInflight)") < html.index('jsonGet("/api/prs"')
+    assert "stateInflight.gen !== gen" in html
+    assert "prsInflight.gen !== gen" in html
+    assert "if (stateCtl) stateCtl.abort()" not in html
+    assert "if (prsCtl) prsCtl.abort()" not in html
+    signed_out = html.split("if (!user)", 1)[1].split("window.__login", 1)[0]
+    assert "abortHubFetches()" in signed_out
+    assert "err.hidden = true" in signed_out
+    switch_fn = html.split("window.__login !== user.login", 1)[1].split("window.__login = user.login", 1)[0]
+    assert "abortHubFetches()" in switch_fn
+    assert "clearHubTables()" in switch_fn
+    clear_fn = html.split("function clearHubTables()", 1)[1].split("function jsonGet", 1)[0]
+    assert 'id="prs-sub"' in html
+    assert "prs-sub" in clear_fn
+    assert "Open PRs authored or assigned to people you can see." in clear_fn
+    catch_fn = html.split("async function render()", 1)[1].split("function kickState()", 1)[0].split("} catch (e)", 1)[1]
+    assert "abortHubFetches()" in catch_fn
+    assert "err.hidden = false" in catch_fn
+    assert 'jsonGet("/api/state", stateCtl, 15000)' in html
+    assert 'jsonGet("/api/prs", prsCtl, 25000)' in html
+    assert "Timed out loading sessions." in html
+    assert "Timed out loading PRs." in html
     assert "GitHub access is missing" in html
     assert "source === \"none\"" in html or "source === 'none'" in html
