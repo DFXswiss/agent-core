@@ -146,6 +146,7 @@
     let termEs = null;
     let openCanControl = false;
     let renderGen = 0;
+    let meInflight = null;
     let stateInflight = null;
     let prsInflight = null;
     let stateGen = 0;
@@ -320,7 +321,8 @@
       const gen = ++renderGen;
       const err = document.getElementById("err");
       try {
-        const user = await me();
+        if (!meInflight) meInflight = me().finally(() => { meInflight = null; });
+        const user = await meInflight;
         if (gen !== renderGen) return;
         document.getElementById("signed-out").classList.toggle("hidden", !!user);
         document.getElementById("signed-in").classList.toggle("hidden", !user);
@@ -361,7 +363,7 @@
         const tasks = (data.task || []).filter(t => t.state !== "done" && t.state !== "failed");
         const working = (data.agent || []).filter(a => a.status === "working");
         const pings = (data.pings || []).filter(p => !p.acked_at);
-        document.getElementById("k-people").textContent = data.visible.length;
+        document.getElementById("k-people").textContent = (data.visible || []).length;
         document.getElementById("k-tasks").textContent = tasks.length;
         document.getElementById("k-agents").textContent = working.length;
         document.getElementById("k-pings").textContent = pings.length;

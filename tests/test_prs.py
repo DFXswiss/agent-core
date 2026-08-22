@@ -193,8 +193,15 @@ def test_index_lists_pr_columns() -> None:
     assert 'id="prs"' in html
     assert html.index('id="prs"') < html.index('id="sessions"')
     assert html.index('id="err"') < html.index('id="signed-in"')
-    assert html.index('k-people").textContent') < html.index('jsonGet("/api/state"')
-    assert html.index('k-people").textContent') < html.index('jsonGet("/api/prs"')
+    render_fn = html.split("async function render()", 1)[1].split("function kickState()", 1)[0]
+    assert 'k-people").textContent' in render_fn
+    assert "kickState();" in render_fn
+    assert "kickPrs();" in render_fn
+    assert "await kickState" not in render_fn
+    assert "await kickPrs" not in render_fn
+    assert html.index('k-people").textContent') < html.index("kickState();")
+    assert html.index("kickState();") < html.index("kickPrs();")
+    assert "if (!meInflight)" in render_fn
     assert html.index("if (stateInflight)") < html.index('jsonGet("/api/state"')
     assert html.index("if (prsInflight)") < html.index('jsonGet("/api/prs"')
     assert "if (stateCtl) stateCtl.abort()" not in html
