@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from starlette.middleware.sessions import SessionMiddleware
 
 from .config import Config
@@ -271,19 +271,42 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         )
         return {"status": "paired", "login": login, "device_id": pending["device_id"]}
 
-    @app.get("/pair")
-    def pair_page() -> FileResponse:
+    def _dashboard_html() -> HTMLResponse:
         page = STATIC / "index.html"
         if not page.is_file():
             raise HTTPException(status_code=500, detail="dashboard is missing")
-        return FileResponse(page)
+        html = page.read_text(encoding="utf-8").replace("__PUBLIC_URL__", cfg.public_url)
+        return HTMLResponse(html)
 
-    @app.get("/")
-    def index() -> FileResponse:
-        page = STATIC / "index.html"
-        if not page.is_file():
-            raise HTTPException(status_code=500, detail="dashboard is missing")
-        return FileResponse(page)
+    def _brand_file(name: str, media_type: str) -> FileResponse:
+        path = STATIC / name
+        if not path.is_file():
+            raise HTTPException(status_code=500, detail="brand file is missing")
+        return FileResponse(path, media_type=media_type)
+
+    @app.api_route("/pair", methods=["GET", "HEAD"])
+    def pair_page() -> HTMLResponse:
+        return _dashboard_html()
+
+    @app.api_route("/", methods=["GET", "HEAD"])
+    def index() -> HTMLResponse:
+        return _dashboard_html()
+
+    @app.api_route("/favicon.ico", methods=["GET", "HEAD"])
+    def favicon_ico() -> FileResponse:
+        return _brand_file("favicon.ico", "image/x-icon")
+
+    @app.api_route("/favicon.svg", methods=["GET", "HEAD"])
+    def favicon_svg() -> FileResponse:
+        return _brand_file("favicon.svg", "image/svg+xml")
+
+    @app.api_route("/apple-touch-icon.png", methods=["GET", "HEAD"])
+    def apple_touch_icon() -> FileResponse:
+        return _brand_file("apple-touch-icon.png", "image/png")
+
+    @app.api_route("/og.png", methods=["GET", "HEAD"])
+    def og_png() -> FileResponse:
+        return _brand_file("og.png", "image/png")
 
     @app.post("/sync/push")
     async def sync_push(request: Request, body: dict[str, Any]) -> dict[str, Any]:
