@@ -68,6 +68,7 @@
   <div id="signed-out" class="bar">
     <a class="btn" id="signin" href="/auth/github">Sign in with GitHub</a>
   </div>
+  <p id="err" hidden></p>
 
   <div id="signed-in" class="hidden">
     <div class="bar">
@@ -131,7 +132,6 @@
     <h2>Devices</h2>
     <table id="devices"><thead><tr><th>Owner</th><th>Name</th><th>Id</th><th>Created</th></tr></thead><tbody></tbody></table>
   </div>
-  <p id="err" hidden></p>
   <script>
     function esc(s) {
       return String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]));
@@ -160,7 +160,7 @@
     }
 
     async function prs() {
-      const res = await fetch("/api/prs");
+      const res = await fetch("/api/prs", { signal: AbortSignal.timeout(25000) });
       if (!res.ok) throw new Error("HTTP " + res.status);
       return res.json();
     }
@@ -327,19 +327,15 @@
         document.getElementById("team-list").textContent = user.teams.length ? user.teams.join(", ") : "none (self only)";
         if (challenge) document.getElementById("pair-box").classList.remove("hidden");
         const data = await state();
-        const prData = await prs();
         err.hidden = true;
         document.getElementById("stamp").textContent = data.generated_at;
         const tasks = (data.task || []).filter(t => t.state !== "done" && t.state !== "failed");
         const working = (data.agent || []).filter(a => a.status === "working");
         const pings = (data.pings || []).filter(p => !p.acked_at);
-        const openPrs = prData.prs || [];
-        document.getElementById("k-prs").textContent = openPrs.length;
         document.getElementById("k-people").textContent = data.visible.length;
         document.getElementById("k-tasks").textContent = tasks.length;
         document.getElementById("k-agents").textContent = working.length;
         document.getElementById("k-pings").textContent = pings.length;
-        fillPrs(openPrs, prData.source);
         fillSessions(data.session || []);
         updateOpenSessionFromState(data.session || []);
         fill("tasks", data.task || [], ["_github_login", "title", "state", "current_round", "workflow"]);
@@ -348,6 +344,17 @@
       } catch (e) {
         err.hidden = false;
         err.textContent = String(e);
+        return;
+      }
+      try {
+        const prData = await prs();
+        const openPrs = prData.prs || [];
+        document.getElementById("k-prs").textContent = openPrs.length;
+        fillPrs(openPrs, prData.source);
+      } catch (e) {
+        document.getElementById("k-prs").textContent = "–";
+        document.getElementById("prs-sub").textContent = String(e);
+        document.querySelector("#prs tbody").innerHTML = "<tr><td colspan='6'>—</td></tr>";
       }
     }
 
