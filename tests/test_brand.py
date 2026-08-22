@@ -30,9 +30,7 @@ def test_dashboard_html_has_optional_theme(hub: TestClient) -> None:
     assert "color-scheme: dark" in body
     pair = hub.get("/pair")
     assert pair.status_code == 200
-    assert 'id="theme-toggle"' in pair.text
-    assert "--bg: #f4f1ea" in pair.text
-    assert "--bg: #161513" in pair.text
+    assert pair.text == body
 
 
 def test_pair_page_has_og_image(hub: TestClient) -> None:
