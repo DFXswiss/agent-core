@@ -21,17 +21,18 @@ def test_dashboard_html_is_dark_mode(hub: TestClient) -> None:
     assert 'name="color-scheme"' in body
     assert 'content="dark"' in body
     assert "color-scheme: dark" in body
-    assert "background: #072440" in body
+    assert "background: #161513" in body
     assert "#f4f1ea" not in body
     assert "#efeae0" not in body
     assert "#f8f4ec" not in body
     assert "background: #fff" not in body
     assert "color: #1a1a1a" not in body
-    assert "border: 1px solid #5d7d9c" in body
+    assert "background: #072440" not in body
+    assert "border: 1px solid #716d64" in body
     pair = hub.get("/pair")
     assert pair.status_code == 200
     assert 'content="dark"' in pair.text
-    assert "background: #072440" in pair.text
+    assert "background: #161513" in pair.text
 
 
 def test_pair_page_has_og_image(hub: TestClient) -> None:
