@@ -8,6 +8,8 @@ The hub stores a full copy of every paired device. Sync is bidirectional: the de
 
 This repository does not describe a particular deployment environment. Run it anywhere that can reach GitHub OAuth and serve HTTPS.
 
+Image builds on `develop` / `main` push `dfxswiss/agent-core:beta` / `:latest` and the git SHA. After a successful push they notify the configured infrastructure repo (`DISPATCH_TOKEN` + `DISPATCH_REPO`) so the running hub pulls the new tag. If those secrets are unset, the image is still published.
+
 ## Run locally
 
 Create a GitHub OAuth App whose callback is `http://127.0.0.1:8787/auth/github/callback`. The hub requests scopes `read:user` and `repo` so the website can list private open PRs as the signed-in user. Then:
@@ -47,7 +49,7 @@ teams:
 
 Logins are compared in lowercase. A login that appears on no team still signs in and still syncs; they only see themselves.
 
-After GitHub sign-in the website leads with a table of **open pull requests** for everyone you can see (author or assignee): Author, Org, Repo, PR, Description, Status.
+After GitHub sign-in the website leads with a table of **open pull requests** for everyone you can see (author or assignee): Author, Org, Repo, PR, Description, Status. The rest of the dashboard loads even if GitHub search is slow or fails.
 
 ## Protocol
 

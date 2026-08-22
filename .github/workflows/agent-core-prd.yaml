@@ -9,7 +9,8 @@ permissions:
   contents: read
 
 env:
-  DOCKER_TAGS: dfxswiss/agent-core:latest
+  IMAGE: dfxswiss/agent-core
+  TAG: latest
 
 jobs:
   build-and-push:
@@ -33,5 +34,23 @@ jobs:
         with:
           context: .
           push: true
-          tags: ${{ env.DOCKER_TAGS }}
+          tags: |
+            ${{ env.IMAGE }}:${{ env.TAG }}
+            ${{ env.IMAGE }}:${{ github.sha }}
           platforms: linux/arm64
+
+      - name: Notify infrastructure to pull :latest
+        env:
+          GH_TOKEN: ${{ secrets.DISPATCH_TOKEN }}
+        run: |
+          set -euo pipefail
+          repo="${{ secrets.DISPATCH_REPO }}"
+          if [ -z "${GH_TOKEN}" ] || [ -z "${repo}" ]; then
+            echo "::warning::DISPATCH_TOKEN or DISPATCH_REPO unset — set them like the other product image repos"
+            exit 0
+          fi
+          gh api "repos/${repo}/dispatches" \
+            -f event_type=image-published \
+            -f "client_payload[image]=${IMAGE}" \
+            -f "client_payload[tag]=${TAG}" \
+            -f "client_payload[sha]=${GITHUB_SHA}"
