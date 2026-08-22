@@ -145,6 +145,7 @@
     let openSessionId = null;
     let termEs = null;
     let openCanControl = false;
+    let renderGen = 0;
 
     async function me() {
       const res = await fetch("/auth/me");
@@ -316,6 +317,7 @@
     }
 
     async function render() {
+      const gen = ++renderGen;
       const err = document.getElementById("err");
       try {
         const user = await me();
@@ -348,10 +350,12 @@
       }
       try {
         const prData = await prs();
+        if (gen !== renderGen) return;
         const openPrs = prData.prs || [];
         document.getElementById("k-prs").textContent = openPrs.length;
         fillPrs(openPrs, prData.source);
       } catch (e) {
+        if (gen !== renderGen) return;
         document.getElementById("k-prs").textContent = "–";
         document.getElementById("prs-sub").textContent = String(e);
         document.querySelector("#prs tbody").innerHTML = "<tr><td colspan='6'>—</td></tr>";
