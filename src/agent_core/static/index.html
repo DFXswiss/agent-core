@@ -146,6 +146,10 @@
     let termEs = null;
     let openCanControl = false;
     let renderGen = 0;
+    let stateInflight = null;
+    let prsInflight = null;
+    let stateGen = 0;
+    let prsGen = 0;
 
     async function me() {
       const res = await fetch("/auth/me");
@@ -154,16 +158,34 @@
       return res.json();
     }
 
-    async function state() {
-      const res = await fetch("/api/state");
-      if (!res.ok) throw new Error("HTTP " + res.status);
-      return res.json();
+    function abortHubFetches() {
+      const s = stateInflight; stateInflight = null;
+      const p = prsInflight; prsInflight = null;
+      if (s) s.ctl.abort();
+      if (p) p.ctl.abort();
     }
 
-    async function prs() {
-      const res = await fetch("/api/prs", { signal: AbortSignal.timeout(25000) });
-      if (!res.ok) throw new Error("HTTP " + res.status);
-      return res.json();
+    function clearHubTables() {
+      document.getElementById("k-tasks").textContent = "–";
+      document.getElementById("k-agents").textContent = "–";
+      document.getElementById("k-pings").textContent = "–";
+      document.getElementById("k-prs").textContent = "–";
+      document.getElementById("prs-sub").textContent = "Open PRs authored or assigned to people you can see.";
+      document.getElementById("stamp").textContent = "";
+      fillSessions([]);
+      fill("tasks", [], ["_github_login", "title", "state", "current_round", "workflow"]);
+      fill("pings", [], ["from_login", "to_login", "kind", "task_id", "acked_at", "_ack"]);
+      fill("devices", [], ["github_login", "name", "id", "created_at"]);
+      document.querySelector("#prs tbody").innerHTML = "<tr><td colspan='6'>—</td></tr>";
+      closeSessionDetail();
+    }
+
+    function jsonGet(url, ctl, ms) {
+      const t = setTimeout(() => ctl.abort(), ms);
+      return fetch(url, { signal: ctl.signal }).then(res => {
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        return res.json();
+      }).finally(() => clearTimeout(t));
     }
 
     function fillPrs(rows, source) {
@@ -321,20 +343,49 @@
       const err = document.getElementById("err");
       try {
         const user = await me();
+        if (gen !== renderGen) return;
         document.getElementById("signed-out").classList.toggle("hidden", !!user);
         document.getElementById("signed-in").classList.toggle("hidden", !user);
-        if (!user) return;
+        if (!user) {
+          abortHubFetches();
+          err.hidden = true;
+          return;
+        }
+        if (window.__login && window.__login !== user.login) {
+          abortHubFetches();
+          clearHubTables();
+        }
         window.__login = user.login;
         document.getElementById("who").textContent = user.login;
         document.getElementById("team-list").textContent = user.teams.length ? user.teams.join(", ") : "none (self only)";
+        document.getElementById("k-people").textContent = (user.visible || []).length;
         if (challenge) document.getElementById("pair-box").classList.remove("hidden");
-        const data = await state();
+      } catch (e) {
+        if (gen !== renderGen) return;
+        abortHubFetches();
+        err.hidden = false;
+        err.textContent = String(e);
+        return;
+      }
+      kickState();
+      kickPrs();
+    }
+
+    function kickState() {
+      if (stateInflight) return stateInflight.p;
+      const stateCtl = new AbortController();
+      const gen = ++stateGen;
+      const p = jsonGet("/api/state", stateCtl, 15000);
+      stateInflight = { ctl: stateCtl, p, gen };
+      p.then(data => {
+        if (!stateInflight || stateInflight.gen !== gen) return;
+        const err = document.getElementById("err");
         err.hidden = true;
         document.getElementById("stamp").textContent = data.generated_at;
         const tasks = (data.task || []).filter(t => t.state !== "done" && t.state !== "failed");
         const working = (data.agent || []).filter(a => a.status === "working");
         const pings = (data.pings || []).filter(p => !p.acked_at);
-        document.getElementById("k-people").textContent = data.visible.length;
+        document.getElementById("k-people").textContent = (data.visible || []).length;
         document.getElementById("k-tasks").textContent = tasks.length;
         document.getElementById("k-agents").textContent = working.length;
         document.getElementById("k-pings").textContent = pings.length;
@@ -343,23 +394,37 @@
         fill("tasks", data.task || [], ["_github_login", "title", "state", "current_round", "workflow"]);
         fill("pings", data.pings || [], ["from_login", "to_login", "kind", "task_id", "acked_at", "_ack"]);
         fill("devices", (data.devices || []).filter(d => !d.revoked_at), ["github_login", "name", "id", "created_at"]);
-      } catch (e) {
+        stateInflight = null;
+      }).catch(e => {
+        if (!stateInflight || stateInflight.gen !== gen) return;
+        const err = document.getElementById("err");
         err.hidden = false;
-        err.textContent = String(e);
-        return;
-      }
-      try {
-        const prData = await prs();
-        if (gen !== renderGen) return;
+        err.textContent = e.name === "AbortError" ? "Timed out loading sessions." : String(e);
+        stateInflight = null;
+      });
+      return p;
+    }
+
+    function kickPrs() {
+      if (prsInflight) return prsInflight.p;
+      const prsCtl = new AbortController();
+      const gen = ++prsGen;
+      const p = jsonGet("/api/prs", prsCtl, 25000);
+      prsInflight = { ctl: prsCtl, p, gen };
+      p.then(prData => {
+        if (!prsInflight || prsInflight.gen !== gen) return;
         const openPrs = prData.prs || [];
         document.getElementById("k-prs").textContent = openPrs.length;
         fillPrs(openPrs, prData.source);
-      } catch (e) {
-        if (gen !== renderGen) return;
+        prsInflight = null;
+      }).catch(e => {
+        if (!prsInflight || prsInflight.gen !== gen) return;
         document.getElementById("k-prs").textContent = "–";
-        document.getElementById("prs-sub").textContent = String(e);
+        document.getElementById("prs-sub").textContent = e.name === "AbortError" ? "Timed out loading PRs." : String(e);
         document.querySelector("#prs tbody").innerHTML = "<tr><td colspan='6'>—</td></tr>";
-      }
+        prsInflight = null;
+      });
+      return p;
     }
 
     document.getElementById("logout").onclick = async () => {
