@@ -157,7 +157,18 @@
       <div class="kpi"><span>Open tasks</span><b id="k-tasks">–</b></div>
       <div class="kpi"><span>Working agents</span><b id="k-agents">–</b></div>
       <div class="kpi"><span>Open pings</span><b id="k-pings">–</b></div>
+      <div class="kpi"><span>Grok usage</span><b id="k-usage">–</b></div>
     </div>
+    <h2>Usage</h2>
+    <table id="usage">
+      <thead>
+        <tr>
+          <th>Owner</th><th>Email</th><th>Provider</th><th>Tier</th>
+          <th>Used</th><th>Reset</th><th>Fetched</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
     <h2>Sessions</h2>
     <table id="sessions"><thead><tr><th>Owner</th><th>Id</th><th>Kind</th><th>Status</th><th>Host</th><th>Last seen</th><th>Control</th></tr></thead><tbody></tbody></table>
     <div id="session-detail" class="hidden">
@@ -255,8 +266,10 @@
       document.getElementById("k-tasks").textContent = "–";
       document.getElementById("k-agents").textContent = "–";
       document.getElementById("k-pings").textContent = "–";
+      document.getElementById("k-usage").textContent = "–";
       document.getElementById("stamp").textContent = "";
       fillSessions([]);
+      fillUsage([]);
       fill("tasks", [], ["_github_login", "title", "state", "current_round", "workflow"]);
       fill("pings", [], ["from_login", "to_login", "kind", "task_id", "acked_at", "_ack"]);
       fill("devices", [], ["github_login", "name", "id", "created_at"]);
@@ -300,6 +313,43 @@
           <td>${esc(s.last_seen_at ?? s.last_seen)}</td>
           <td>${ctrl}</td>
         </tr>`;
+      }).join("") || "<tr><td colspan='7'>—</td></tr>";
+    }
+
+    function latestUsageRows(activities) {
+      const rows = Array.isArray(activities) ? activities : [];
+      const seen = new Set();
+      const out = [];
+      for (const row of rows) {
+        if (!row || typeof row !== "object" || row.type !== "usage.snapshot") continue;
+        const payload = row.payload || {};
+        const provider = payload.provider || payload.vendor || "";
+        const email = payload.account_email || "";
+        const key = (row._github_login || "") + "\0" + provider + "\0" + email;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(row);
+      }
+      return out;
+    }
+
+    function fillUsage(activities) {
+      const tb = document.querySelector("#usage tbody");
+      const rows = latestUsageRows(activities);
+      tb.innerHTML = rows.map(row => {
+        const payload = row.payload || {};
+        const used = typeof payload.used_percent === "number"
+          ? payload.used_percent + "%"
+          : payload.used_percent;
+        return "<tr>" +
+          "<td>" + esc(row._github_login) + "</td>" +
+          "<td>" + esc(payload.account_email) + "</td>" +
+          "<td>" + esc(payload.provider || payload.vendor) + "</td>" +
+          "<td>" + esc(payload.tier) + "</td>" +
+          "<td>" + esc(used) + "</td>" +
+          "<td>" + esc(payload.period_end) + "</td>" +
+          "<td>" + esc(payload.fetched_at) + "</td>" +
+          "</tr>";
       }).join("") || "<tr><td colspan='7'>—</td></tr>";
     }
 
@@ -454,6 +504,12 @@
         fill("tasks", data.task || [], ["_github_login", "title", "state", "current_round", "workflow"]);
         fill("pings", data.pings || [], ["from_login", "to_login", "kind", "task_id", "acked_at", "_ack"]);
         fill("devices", (data.devices || []).filter(d => !d.revoked_at), ["github_login", "name", "id", "created_at"]);
+        fillUsage(data.activity || []);
+        const own = latestUsageRows(data.activity || []).find(r => r._github_login === data.login);
+        const ownPct = own && own.payload && typeof own.payload.used_percent === "number"
+          ? own.payload.used_percent + "%"
+          : "–";
+        document.getElementById("k-usage").textContent = ownPct;
         stateInflight = null;
       }).catch(e => {
         if (!stateInflight || stateInflight.gen !== gen) return;
