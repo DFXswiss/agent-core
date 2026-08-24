@@ -51,6 +51,7 @@ def test_checked_in_teams_yaml_loads() -> None:
         "marassteiner",
         "danswar",
         "joshuakrueger-dfx",
+        "jonnyluca",
     ]
 
 
