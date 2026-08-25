@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
+from base64 import b64decode
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from fastapi.testclient import TestClient
+from itsdangerous import TimestampSigner
 
 import httpx
 import pytest
@@ -139,7 +142,8 @@ def test_prs_survive_new_hub(cfg, github: FakeGitHub) -> None:
     first = TestClient(create_app(cfg, github=github, store=store))
     sign_in(first, "code-alice")
     assert first.get("/api/prs").json()["source"] == "github"
-    second = TestClient(create_app(cfg, github=github, store=store))
+    store.close()
+    second = TestClient(create_app(cfg, github=github, store=Store(cfg.database)))
     second.cookies.update(first.cookies)
     body = second.get("/api/prs").json()
     assert body["source"] == "github"
@@ -151,8 +155,12 @@ def test_auth_me_has_no_token(hub, cfg) -> None:
     me = hub.get("/auth/me").json()
     assert set(me) == {"login", "visible", "teams"}
     assert "token" not in me and "github_token" not in me
-    cookie = ";".join(f"{k}={v}" for k, v in hub.cookies.items())
-    assert "tok-alice" not in cookie
+    raw = hub.cookies["session"]
+    data = TimestampSigner(cfg.session_secret).unsign(
+        raw.encode("utf-8"), max_age=14 * 24 * 60 * 60
+    )
+    payload = json.loads(b64decode(data))
+    assert payload == {"login": "alice"}
     store = Store(cfg.database)
     assert store.get_oauth_token("alice") == "tok-alice"
 
