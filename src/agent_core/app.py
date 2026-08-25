@@ -407,13 +407,17 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                 hub.github_tokens[login] = token
         if token == "":
             return {"generated_at": utcnow(), "prs": [], "source": "none"}
+        failed = token
         try:
             prs = hub.github.search_open_prs(token, allowed)
         except GitHubError as exc:
             text = str(exc)
             if "HTTP 401" in text:
-                hub.store.delete_oauth_token(login)
-                hub.github_tokens.pop(login, None)
+                current = hub.store.get_oauth_token(login)
+                if current == failed:
+                    hub.store.delete_oauth_token(login)
+                if hub.github_tokens.get(login) == failed:
+                    hub.github_tokens.pop(login, None)
                 return {"generated_at": utcnow(), "prs": [], "source": "none"}
             raise HTTPException(status_code=502, detail=text) from exc
         truncated = len(prs) >= 50

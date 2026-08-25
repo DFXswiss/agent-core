@@ -5,9 +5,12 @@ from urllib.parse import parse_qs, urlparse
 
 from fastapi.testclient import TestClient
 
+import httpx
+import pytest
+
 from agent_core.app import create_app
 from agent_core.db import Store
-from agent_core.github import FakeGitHub, RealGitHub, _pr_from_search_item
+from agent_core.github import FakeGitHub, GitHubError, RealGitHub, _pr_from_search_item
 from tests.conftest import sign_in
 
 
@@ -192,6 +195,26 @@ def test_rate_limit_does_not_drop_token(hub, github: FakeGitHub, cfg) -> None:
     assert "HTTP 403" in res.json()["detail"]
     store = Store(cfg.database)
     assert store.get_oauth_token("alice") == "tok-alice"
+
+
+def test_malformed_search_items_is_502(hub, cfg, monkeypatch: pytest.MonkeyPatch) -> None:
+    sign_in(hub, "code-alice")
+    hub.app.state.hub.github = RealGitHub(cfg)
+
+    class _Resp:
+        status_code = 200
+
+        def json(self) -> dict:
+            return {"items": None}
+
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: _Resp())
+    res = hub.get("/api/prs")
+    assert res.status_code == 502
+    assert "HTTP 200" in res.json()["detail"]
+    store = Store(cfg.database)
+    assert store.get_oauth_token("alice") == "tok-alice"
+    with pytest.raises(GitHubError, match="HTTP 200"):
+        RealGitHub(cfg).search_open_prs("tok-alice", ["alice"])
 
 
 def test_dashboard_state_comes_from_replica(hub) -> None:

@@ -140,7 +140,7 @@ class RealGitHub(GitHub):
         body = resp.json()
         items = body.get("items") if isinstance(body, dict) else None
         if not isinstance(items, list):
-            return []
+            raise GitHubError("PR search failed: HTTP 200")
         out: list[dict[str, Any]] = []
         seen_keys: set[tuple[str, str, int]] = set()
         for item in items:
