@@ -254,8 +254,9 @@ Otherwise JSON snapshot:
 
 Cookie session after GitHub OAuth.
 
-- `GET /auth/me` — login, visible logins, teams. GitHub OAuth is sign-in only (`read:user`); the website never calls GitHub for dashboard data.
-- `GET /api/state` — materialized rows the caller may see (sessions include `can_control` and `control_connected`). The signed-in website shows only this replica. Replica arrays are newest-first (`updated_at` descending, then `row_id`). `devices` is newest-first (`created_at` descending, then `id`).
+- `GET /auth/me` — login, visible logins, teams. GitHub OAuth is sign-in and PR-search (`read:user repo`); the token is not in the cookie.
+- `GET /api/prs` — open GitHub pull requests authored or assigned to visible logins. Search uses the signed-in user's OAuth token (scope `read:user repo`), stored in hub sqlite (`oauth_token`) and memory, not in the cookie. `source` is `github` or `none` (signed in, but no token — sign in again). Columns: author, org, repo, number, title, status (`open`|`draft`), url. `truncated` is true when 50 rows were returned.
+- `GET /api/state` — materialized rows the caller may see (sessions include `can_control` and `control_connected`). The signed-in website leads with `/api/prs`, then replica tables from `/api/state`. Replica arrays are newest-first (`updated_at` descending, then `row_id`). `devices` is newest-first (`created_at` descending, then `id`).
 - `GET /api/sessions/{id}` — one visible session plus control flags.
 - `POST /api/sessions/{id}/control` — start / stop / input / resize (owner device only).
 - `GET /api/sessions/{id}/terminal` — JSON ring snapshot or SSE terminal stream.
