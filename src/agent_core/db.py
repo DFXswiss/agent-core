@@ -159,8 +159,14 @@ class Store:
         token = row["token"]
         return token if isinstance(token, str) else ""
 
-    def delete_oauth_token(self, github_login: str) -> None:
-        self.execute("DELETE FROM oauth_token WHERE github_login = ?", (github_login,))
+    def delete_oauth_token(self, github_login: str, token: str | None = None) -> None:
+        if token is None:
+            self.execute("DELETE FROM oauth_token WHERE github_login = ?", (github_login,))
+            return
+        self.execute(
+            "DELETE FROM oauth_token WHERE github_login = ? AND token = ?",
+            (github_login, token),
+        )
 
     def all_oauth_tokens(self) -> list[tuple[str, str]]:
         rows = self.query("SELECT github_login, token FROM oauth_token")

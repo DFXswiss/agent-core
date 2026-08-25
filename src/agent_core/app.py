@@ -413,9 +413,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         except GitHubError as exc:
             text = str(exc)
             if "HTTP 401" in text:
-                current = hub.store.get_oauth_token(login)
-                if current == failed:
-                    hub.store.delete_oauth_token(login)
+                hub.store.delete_oauth_token(login, failed)
                 if hub.github_tokens.get(login) == failed:
                     hub.github_tokens.pop(login, None)
                 return {"generated_at": utcnow(), "prs": [], "source": "none"}
