@@ -12,7 +12,7 @@ Image builds on `develop` / `main` push `dfxswiss/agent-core:beta` / `:latest` a
 
 ## Run locally
 
-Create a GitHub OAuth App whose callback is `http://127.0.0.1:8787/auth/github/callback`. The hub requests scope `read:user` so people can sign in. The website shows only the local hub replica — sessions, tasks, agents, pings, devices, usage snapshots. Then:
+Create a GitHub OAuth App whose callback is `http://127.0.0.1:8787/auth/github/callback`. The hub requests scope `read:user repo` so people can sign in and the website can list open pull requests. After sign-in the website leads with open PRs from GitHub (`GET /api/prs`); usage, sessions, tasks, agents, pings, and devices come from the local hub replica. Then:
 
 ```bash
 python3 -m venv .venv
