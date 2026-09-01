@@ -38,7 +38,7 @@ def test_api_state_error_activity_newest_first(hub: TestClient) -> None:
                 "service": "api",
                 "environment": "prod",
                 "class": "TimeoutError",
-                "repo": "DFXswiss/backend",
+                "repo": "acme/app",
                 "count": 3,
                 "first_seen": "2026-08-21T09:00:00Z",
                 "last_seen": "2026-08-21T10:00:00Z",
@@ -75,7 +75,7 @@ def test_api_state_error_activity_newest_first(hub: TestClient) -> None:
     assert seen["payload"]["fingerprint"] == "fp-abc"
     assert seen["payload"]["service"] == "api"
     assert seen["payload"]["class"] == "TimeoutError"
-    assert seen["payload"]["repo"] == "DFXswiss/backend"
+    assert seen["payload"]["repo"] == "acme/app"
     assert seen["payload"]["count"] == 3
     assert "last_seen" in seen["payload"]
     assert fix["payload"]["error_id"] == "error-seen-1"
@@ -83,3 +83,125 @@ def test_api_state_error_activity_newest_first(hub: TestClient) -> None:
     assert fix["payload"]["execution_status"] == "pr_opened"
     assert seen["_github_login"] == "alice"
     assert fix["_github_login"] == "alice"
+
+
+def test_api_state_keeps_duplicate_fingerprint_error_seen_rows(hub: TestClient) -> None:
+    sign_in(hub, "code-alice")
+    _insert_replica(
+        hub,
+        table="activity",
+        row_id="error-seen-dup-a",
+        updated_at="2026-08-21T11:00:00Z",
+        payload={
+            "id": "error-seen-dup-a",
+            "type": "error.seen",
+            "payload": {
+                "fingerprint": "fp-dup",
+                "service": "api",
+                "environment": "prod",
+                "class": "TimeoutError",
+                "repo": "acme/app",
+                "count": 2,
+                "first_seen": "2026-08-21T10:00:00Z",
+                "last_seen": "2026-08-21T11:00:00Z",
+                "excerpt": "timed out waiting",
+                "evidence": "log://example-a",
+                "line_fingerprint": "line-fp-dup-a",
+            },
+        },
+    )
+    _insert_replica(
+        hub,
+        table="activity",
+        row_id="error-seen-dup-b",
+        updated_at="2026-08-21T12:00:00Z",
+        payload={
+            "id": "error-seen-dup-b",
+            "type": "error.seen",
+            "payload": {
+                "fingerprint": "fp-dup",
+                "service": "api",
+                "environment": "prod",
+                "class": "TimeoutError",
+                "repo": "acme/app",
+                "count": 5,
+                "first_seen": "2026-08-21T10:30:00Z",
+                "last_seen": "2026-08-21T12:00:00Z",
+                "excerpt": "timed out waiting again",
+                "evidence": "log://example-b",
+                "line_fingerprint": "line-fp-dup-b",
+            },
+        },
+    )
+    state = hub.get("/api/state").json()
+    seen_ids = {
+        row["id"]
+        for row in state["activity"]
+        if row.get("type") == "error.seen"
+    }
+    assert "error-seen-dup-a" in seen_ids
+    assert "error-seen-dup-b" in seen_ids
+
+
+def test_api_state_preserves_conclusion_error_id_matching_shape(hub: TestClient) -> None:
+    sign_in(hub, "code-alice")
+    _insert_replica(
+        hub,
+        table="activity",
+        row_id="error-seen-2",
+        updated_at="2026-08-21T13:00:00Z",
+        payload={
+            "id": "error-seen-2",
+            "type": "error.seen",
+            "payload": {
+                "fingerprint": "fp-match",
+                "service": "worker",
+                "environment": "prod",
+                "class": "ValueError",
+                "repo": "acme/app",
+                "count": 1,
+                "first_seen": "2026-08-21T12:00:00Z",
+                "last_seen": "2026-08-21T13:00:00Z",
+                "excerpt": "invalid value",
+                "evidence": "log://example-2",
+                "line_fingerprint": "line-fp-2",
+            },
+        },
+    )
+    _insert_replica(
+        hub,
+        table="activity",
+        row_id="error-fix-2",
+        updated_at="2026-08-22T14:00:00Z",
+        payload={
+            "id": "error-fix-2",
+            "type": "error.fix",
+            "payload": {
+                "error_id": "error-seen-2",
+                "fingerprint": "fp-match",
+                "execution_status": "pr_opened",
+            },
+        },
+    )
+    _insert_replica(
+        hub,
+        table="activity",
+        row_id="error-skip-other",
+        updated_at="2026-08-22T15:00:00Z",
+        payload={
+            "id": "error-skip-other",
+            "type": "error.skip",
+            "payload": {
+                "error_id": "error-seen-other",
+                "fingerprint": "fp-other",
+                "execution_status": "skipped",
+            },
+        },
+    )
+    state = hub.get("/api/state").json()
+    fix = next(row for row in state["activity"] if row["id"] == "error-fix-2")
+    skip = next(row for row in state["activity"] if row["id"] == "error-skip-other")
+    assert fix["type"] == "error.fix"
+    assert fix["payload"]["error_id"] == "error-seen-2"
+    assert skip["type"] == "error.skip"
+    assert skip["payload"]["error_id"] == "error-seen-other"

@@ -120,3 +120,4 @@ def test_dashboard_keeps_api_order(hub: TestClient) -> None:
     assert 'fill("pings", data.pings || []' in html
     assert 'fill("devices", (data.devices || [])' in html
     assert "fillUsage(data.activity" in html
+    assert "fillErrors(data.activity" in html

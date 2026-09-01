@@ -407,7 +407,7 @@
       for (const row of rows) {
         if (!row || typeof row !== "object" || row.type !== "error.seen") continue;
         const payload = row.payload || {};
-        const fingerprint = payload.fingerprint || "";
+        const fingerprint = payload.fingerprint || ("__id:" + row.id);
         if (seen.has(fingerprint)) continue;
         seen.add(fingerprint);
         out.push(row);

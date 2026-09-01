@@ -278,6 +278,7 @@ def test_index_lists_pr_columns() -> None:
     assert "Open PRs authored or assigned to people you can see." in clear_fn
     assert "k-prs" in clear_fn
     assert "k-usage" in clear_fn
+    assert "k-errors" in clear_fn
     catch_fn = html.split("async function render()", 1)[1].split("function kickState()", 1)[0].split("} catch (e)", 1)[1]
     assert "abortHubFetches()" in catch_fn
     assert "err.hidden = false" in catch_fn
@@ -289,7 +290,9 @@ def test_index_lists_pr_columns() -> None:
     assert "source === \"none\"" in html or "source === 'none'" in html
     assert "No open PRs for visible people." in html
     assert 'id="usage"' in html
+    assert 'id="errors"' in html
     assert 'id="k-usage"' in html
+    assert 'id="k-errors"' in html
 
 
 def test_oauth_scope_is_read_user_repo(cfg) -> None:
