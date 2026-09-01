@@ -194,7 +194,7 @@ def test_api_state_preserves_conclusion_error_id_matching_shape(hub: TestClient)
             "payload": {
                 "error_id": "error-seen-other",
                 "fingerprint": "fp-other",
-                "execution_status": "skipped",
+                "reason": "unmapped-repo",
             },
         },
     )
@@ -205,3 +205,4 @@ def test_api_state_preserves_conclusion_error_id_matching_shape(hub: TestClient)
     assert fix["payload"]["error_id"] == "error-seen-2"
     assert skip["type"] == "error.skip"
     assert skip["payload"]["error_id"] == "error-seen-other"
+    assert skip["payload"]["reason"] == "unmapped-repo"
