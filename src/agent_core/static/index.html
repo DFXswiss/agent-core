@@ -159,6 +159,7 @@
       <div class="kpi"><span>Working agents</span><b id="k-agents">–</b></div>
       <div class="kpi"><span>Open pings</span><b id="k-pings">–</b></div>
       <div class="kpi"><span>Grok usage</span><b id="k-usage">–</b></div>
+      <div class="kpi"><span>Open errors</span><b id="k-errors">–</b></div>
     </div>
     <h2>Pull requests</h2>
     <p class="sub" id="prs-sub">Open PRs authored or assigned to people you can see.</p>
@@ -169,6 +170,16 @@
         <tr>
           <th>Owner</th><th>Email</th><th>Provider</th><th>Tier</th>
           <th>Used</th><th>Reset</th><th>Fetched</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <h2>Errors</h2>
+    <table id="errors">
+      <thead>
+        <tr>
+          <th>Repo</th><th>Service</th><th>Class</th>
+          <th>Count</th><th>Last seen</th><th>Status</th>
         </tr>
       </thead>
       <tbody></tbody>
@@ -276,10 +287,12 @@
       document.getElementById("k-pings").textContent = "–";
       document.getElementById("k-prs").textContent = "–";
       document.getElementById("k-usage").textContent = "–";
+      document.getElementById("k-errors").textContent = "–";
       document.getElementById("prs-sub").textContent = "Open PRs authored or assigned to people you can see.";
       document.getElementById("stamp").textContent = "";
       fillSessions([]);
       fillUsage([]);
+      fillErrors([]);
       fill("tasks", [], ["_github_login", "title", "state", "current_round", "workflow"]);
       fill("pings", [], ["from_login", "to_login", "kind", "task_id", "acked_at", "_ack"]);
       fill("devices", [], ["github_login", "name", "id", "created_at"]);
@@ -385,6 +398,55 @@
           "<td>" + esc(payload.fetched_at) + "</td>" +
           "</tr>";
       }).join("") || "<tr><td colspan='7'>—</td></tr>";
+    }
+
+    function latestErrorSeenRows(activities) {
+      const rows = Array.isArray(activities) ? activities : [];
+      const seen = new Set();
+      const out = [];
+      for (const row of rows) {
+        if (!row || typeof row !== "object" || row.type !== "error.seen") continue;
+        const payload = row.payload || {};
+        const fingerprint = payload.fingerprint || "";
+        if (seen.has(fingerprint)) continue;
+        seen.add(fingerprint);
+        out.push(row);
+      }
+      return out;
+    }
+
+    function conclusionFor(activities, errorSeenId) {
+      const rows = Array.isArray(activities) ? activities : [];
+      for (const row of rows) {
+        if (!row || typeof row !== "object") continue;
+        if (row.type !== "error.fix" && row.type !== "error.skip") continue;
+        const payload = row.payload || {};
+        if (payload.error_id === errorSeenId) return row;
+      }
+      return null;
+    }
+
+    function fillErrors(activities) {
+      const tb = document.querySelector("#errors tbody");
+      const rows = latestErrorSeenRows(activities);
+      tb.innerHTML = rows.map(row => {
+        const payload = row.payload || {};
+        const conclusion = conclusionFor(activities, row.id);
+        let status = "new";
+        if (conclusion && conclusion.type === "error.skip") {
+          status = "skipped: " + ((conclusion.payload || {}).reason || "");
+        } else if (conclusion && conclusion.type === "error.fix") {
+          status = "fix: " + ((conclusion.payload || {}).execution_status || "");
+        }
+        return "<tr>" +
+          "<td>" + esc(payload.repo) + "</td>" +
+          "<td>" + esc(payload.service) + "</td>" +
+          "<td>" + esc(payload.class) + "</td>" +
+          "<td>" + esc(payload.count) + "</td>" +
+          "<td>" + esc(payload.last_seen) + "</td>" +
+          "<td>" + esc(status) + "</td>" +
+          "</tr>";
+      }).join("") || "<tr><td colspan='6'>—</td></tr>";
     }
 
     function setControlEnabled(online) {
@@ -545,6 +607,11 @@
           ? own.payload.used_percent + "%"
           : "–";
         document.getElementById("k-usage").textContent = ownPct;
+        fillErrors(data.activity || []);
+        const openErrors = latestErrorSeenRows(data.activity || []).filter(
+          r => conclusionFor(data.activity || [], r.id) === null
+        );
+        document.getElementById("k-errors").textContent = openErrors.length;
         stateInflight = null;
       }).catch(e => {
         if (!stateInflight || stateInflight.gen !== gen) return;
