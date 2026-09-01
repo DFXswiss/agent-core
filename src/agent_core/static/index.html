@@ -415,23 +415,24 @@
       return out;
     }
 
-    function conclusionFor(activities, errorSeenId) {
+    function buildConclusionMap(activities) {
+      const map = new Map();
       const rows = Array.isArray(activities) ? activities : [];
       for (const row of rows) {
         if (!row || typeof row !== "object") continue;
         if (row.type !== "error.fix" && row.type !== "error.skip") continue;
         const payload = row.payload || {};
-        if (payload.error_id === errorSeenId) return row;
+        if (!map.has(payload.error_id)) map.set(payload.error_id, row);
       }
-      return null;
+      return map;
     }
 
-    function fillErrors(activities) {
+    function fillErrors(activities, conclusionMap = new Map()) {
       const tb = document.querySelector("#errors tbody");
       const rows = latestErrorSeenRows(activities);
       tb.innerHTML = rows.map(row => {
         const payload = row.payload || {};
-        const conclusion = conclusionFor(activities, row.id);
+        const conclusion = conclusionMap.get(row.id) || null;
         let status = "new";
         if (conclusion && conclusion.type === "error.skip") {
           status = "skipped: " + ((conclusion.payload || {}).reason || "");
@@ -607,11 +608,11 @@
           ? own.payload.used_percent + "%"
           : "–";
         document.getElementById("k-usage").textContent = ownPct;
-        fillErrors(data.activity || []);
-        const openErrors = latestErrorSeenRows(data.activity || []).filter(
-          r => conclusionFor(data.activity || [], r.id) === null
-        );
-        document.getElementById("k-errors").textContent = openErrors.length;
+        const conclusionMap = buildConclusionMap(data.activity || []);
+        fillErrors(data.activity || [], conclusionMap);
+        document.getElementById("k-errors").textContent = latestErrorSeenRows(data.activity || []).filter(
+          r => !conclusionMap.has(r.id)
+        ).length;
         stateInflight = null;
       }).catch(e => {
         if (!stateInflight || stateInflight.gen !== gen) return;

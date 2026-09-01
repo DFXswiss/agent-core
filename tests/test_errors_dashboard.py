@@ -18,9 +18,9 @@ def test_dashboard_html_has_errors_table(hub: TestClient) -> None:
     assert ".reverse(" not in body
     assert 'row.type !== "error.seen"' in body
     assert "seen.has(fingerprint)" in body
-    assert "function conclusionFor(activities, errorSeenId)" in body
+    assert "function buildConclusionMap(activities)" in body
     assert 'row.type !== "error.fix" && row.type !== "error.skip"' in body
-    assert "payload.error_id === errorSeenId" in body
+    assert "!map.has(payload.error_id)" in body
 
 
 def test_api_state_error_activity_newest_first(hub: TestClient) -> None:
@@ -83,6 +83,77 @@ def test_api_state_error_activity_newest_first(hub: TestClient) -> None:
     assert fix["payload"]["execution_status"] == "pr_opened"
     assert seen["_github_login"] == "alice"
     assert fix["_github_login"] == "alice"
+
+
+def test_api_state_error_seen_rows_newest_first(hub: TestClient) -> None:
+    sign_in(hub, "code-alice")
+    _insert_replica(
+        hub,
+        table="activity",
+        row_id="error-seen-old",
+        updated_at="2026-08-21T10:00:00Z",
+        payload={
+            "id": "error-seen-old",
+            "type": "error.seen",
+            "payload": {
+                "fingerprint": "fp-old",
+                "service": "api",
+                "environment": "prod",
+                "class": "TimeoutError",
+                "repo": "acme/app",
+                "count": 2,
+                "first_seen": "2026-08-21T09:00:00Z",
+                "last_seen": "2026-08-21T10:00:00Z",
+                "excerpt": "timed out waiting",
+                "evidence": "log://example-old",
+                "line_fingerprint": "line-fp-old",
+            },
+        },
+    )
+    _insert_replica(
+        hub,
+        table="activity",
+        row_id="error-seen-new",
+        updated_at="2026-08-22T21:00:00Z",
+        payload={
+            "id": "error-seen-new",
+            "type": "error.seen",
+            "payload": {
+                "fingerprint": "fp-new",
+                "service": "api",
+                "environment": "prod",
+                "class": "TimeoutError",
+                "repo": "acme/app",
+                "count": 5,
+                "first_seen": "2026-08-22T20:00:00Z",
+                "last_seen": "2026-08-22T21:00:00Z",
+                "excerpt": "timed out waiting again",
+                "evidence": "log://example-new",
+                "line_fingerprint": "line-fp-new",
+            },
+        },
+    )
+    state = hub.get("/api/state").json()
+    seen = [row for row in state["activity"] if row.get("type") == "error.seen"]
+    assert [row["id"] for row in seen] == ["error-seen-new", "error-seen-old"]
+    for row in seen:
+        inner = row["payload"]
+        assert inner["service"] == "api"
+        assert inner["environment"] == "prod"
+        assert inner["class"] == "TimeoutError"
+        assert inner["repo"] == "acme/app"
+        assert "count" in inner
+        assert "first_seen" in inner
+        assert "last_seen" in inner
+        assert "excerpt" in inner
+        assert "evidence" in inner
+        assert "line_fingerprint" in inner
+    assert seen[0]["payload"]["fingerprint"] == "fp-new"
+    assert seen[1]["payload"]["fingerprint"] == "fp-old"
+    assert seen[0]["payload"]["count"] == 5
+    assert seen[1]["payload"]["count"] == 2
+    assert seen[0]["_github_login"] == "alice"
+    assert seen[1]["_github_login"] == "alice"
 
 
 def test_api_state_keeps_duplicate_fingerprint_error_seen_rows(hub: TestClient) -> None:
