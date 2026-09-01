@@ -250,6 +250,8 @@ def test_index_lists_pr_columns() -> None:
     assert html.index("<h2>Pull requests</h2>") < html.index("<h2>Usage</h2>")
     assert html.index('id="usage"') < html.index('id="errors"')
     assert html.index("<h2>Usage</h2>") < html.index("<h2>Errors</h2>")
+    assert html.index('id="errors"') < html.index('id="sessions"')
+    assert html.index("<h2>Errors</h2>") < html.index("<h2>Sessions</h2>")
     assert html.index('id="prs"') < html.index('id="sessions"')
     assert html.index('id="err"') < html.index('id="signed-in"')
     render_fn = html.split("async function render()", 1)[1].split("function kickState()", 1)[0]
