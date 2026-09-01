@@ -96,7 +96,7 @@ def test_api_state_error_seen_rows_newest_first(hub: TestClient) -> None:
             "id": "error-seen-old",
             "type": "error.seen",
             "payload": {
-                "fingerprint": "fp-old",
+                "fingerprint": "fp-shared",
                 "service": "api",
                 "environment": "prod",
                 "class": "TimeoutError",
@@ -119,7 +119,7 @@ def test_api_state_error_seen_rows_newest_first(hub: TestClient) -> None:
             "id": "error-seen-new",
             "type": "error.seen",
             "payload": {
-                "fingerprint": "fp-new",
+                "fingerprint": "fp-shared",
                 "service": "api",
                 "environment": "prod",
                 "class": "TimeoutError",
@@ -148,8 +148,8 @@ def test_api_state_error_seen_rows_newest_first(hub: TestClient) -> None:
         assert "excerpt" in inner
         assert "evidence" in inner
         assert "line_fingerprint" in inner
-    assert seen[0]["payload"]["fingerprint"] == "fp-new"
-    assert seen[1]["payload"]["fingerprint"] == "fp-old"
+    assert seen[0]["payload"]["fingerprint"] == "fp-shared"
+    assert seen[1]["payload"]["fingerprint"] == "fp-shared"
     assert seen[0]["payload"]["count"] == 5
     assert seen[1]["payload"]["count"] == 2
     assert seen[0]["_github_login"] == "alice"
