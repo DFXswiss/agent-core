@@ -70,6 +70,8 @@ def test_filter_leaves_lines_without_token_untouched() -> None:
         ("/sync/ws%3Fa%3D1%26token%3Dabc.def%26v%3D2", f"/sync/ws%3Fa%3D1%26token%3D{REDACTED}%26v%3D2"),
         ("/sync/ws%253Ftoken%253Dabc.def%2526v%253D2", f"/sync/ws%253Ftoken%253D{REDACTED}%2526v%253D2"),
         (f"/sync/ws?TOKEN={SECRET}", f"/sync/ws?TOKEN={REDACTED}"),
+        (f"/sync/ws?t%6Fken={SECRET}&v=2", f"/sync/ws?t%6Fken={REDACTED}&v=2"),
+        (f"/sync/ws?%54%4f%4B%45%4E={SECRET}", f"/sync/ws?%54%4f%4B%45%4E={REDACTED}"),
         (f"/sync/ws?token={REDACTED}&v=2", f"/sync/ws?token={REDACTED}&v=2"),
     ],
 )

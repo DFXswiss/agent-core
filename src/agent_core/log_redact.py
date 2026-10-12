@@ -12,9 +12,11 @@ from uvicorn.config import LOGGING_CONFIG
 REDACTED = "<redacted>"
 
 # `token=<value>` as a query parameter, also when the request target itself is
-# percent-encoded (`token%3D<value>%26...`, any encoding depth).
+# percent-encoded (`token%3D<value>%26...`, any encoding depth) or the name is
+# spelled with percent-escapes (`t%6Fken=`).
+_NAME = "".join(f"(?:{c}|%(?:25)*{ord(c):X}|%(?:25)*{ord(c.upper()):X})" for c in "token")
 _TOKEN = re.compile(
-    r"(token)(?:(=)[^&\s\"']+|(%(?:25)*3D)(?:(?!%(?:25)*26)[^&\s\"'])+)",
+    rf"({_NAME})(?:(=)[^&\s\"']+|(%(?:25)*3D)(?:(?!%(?:25)*26)[^&\s\"'])+)",
     re.IGNORECASE,
 )
 
