@@ -153,12 +153,16 @@
       <p id="pair-msg"></p>
     </div>
     <div class="kpis">
+      <div class="kpi"><span>Open PRs</span><b id="k-prs">–</b></div>
       <div class="kpi"><span>Visible people</span><b id="k-people">–</b></div>
       <div class="kpi"><span>Open tasks</span><b id="k-tasks">–</b></div>
       <div class="kpi"><span>Working agents</span><b id="k-agents">–</b></div>
       <div class="kpi"><span>Open pings</span><b id="k-pings">–</b></div>
       <div class="kpi"><span>Grok usage</span><b id="k-usage">–</b></div>
     </div>
+    <h2>Pull requests</h2>
+    <p class="sub" id="prs-sub">Open PRs authored or assigned to people you can see.</p>
+    <table id="prs"><thead><tr><th>Author</th><th>Org</th><th>Repo</th><th>PR</th><th>Description</th><th>Status</th></tr></thead><tbody></tbody></table>
     <h2>Usage</h2>
     <table id="usage">
       <thead>
@@ -249,6 +253,8 @@
     let renderGen = 0;
     let stateInflight = null;
     let stateGen = 0;
+    let prsInflight = null;
+    let prsGen = 0;
 
     async function me() {
       const res = await fetch("/auth/me");
@@ -259,20 +265,25 @@
 
     function abortHubFetches() {
       const s = stateInflight; stateInflight = null;
+      const p = prsInflight; prsInflight = null;
       if (s) s.ctl.abort();
+      if (p) p.ctl.abort();
     }
 
     function clearHubTables() {
       document.getElementById("k-tasks").textContent = "–";
       document.getElementById("k-agents").textContent = "–";
       document.getElementById("k-pings").textContent = "–";
+      document.getElementById("k-prs").textContent = "–";
       document.getElementById("k-usage").textContent = "–";
+      document.getElementById("prs-sub").textContent = "Open PRs authored or assigned to people you can see.";
       document.getElementById("stamp").textContent = "";
       fillSessions([]);
       fillUsage([]);
       fill("tasks", [], ["_github_login", "title", "state", "current_round", "workflow"]);
       fill("pings", [], ["from_login", "to_login", "kind", "task_id", "acked_at", "_ack"]);
       fill("devices", [], ["github_login", "name", "id", "created_at"]);
+      document.querySelector("#prs tbody").innerHTML = "<tr><td colspan='6'>—</td></tr>";
       closeSessionDetail();
     }
 
@@ -282,6 +293,29 @@
         if (!res.ok) throw new Error("HTTP " + res.status);
         return res.json();
       }).finally(() => clearTimeout(t));
+    }
+
+    function fillPrs(rows, source) {
+      const tb = document.querySelector("#prs tbody");
+      const sub = document.getElementById("prs-sub");
+      if (source === "none") {
+        sub.innerHTML = 'GitHub access is missing. <a href="/auth/github">Sign in with GitHub</a> again to load PRs.';
+        tb.innerHTML = "<tr><td colspan='6'>—</td></tr>";
+        return;
+      }
+      sub.textContent = "Open PRs authored or assigned to people you can see.";
+      const list = rows || [];
+      tb.innerHTML = list.map(r => {
+        const href = r.url ? `<a href="${esc(r.url)}" target="_blank" rel="noopener">#${esc(r.number)}</a>` : esc(r.number);
+        return `<tr>
+          <td>${esc(r.author)}</td>
+          <td>${esc(r.org)}</td>
+          <td>${esc(r.repo)}</td>
+          <td>${href}</td>
+          <td>${esc(r.title)}</td>
+          <td class="${esc(r.status)}">${esc(r.status)}</td>
+        </tr>`;
+      }).join("") || "<tr><td colspan='6'>No open PRs for visible people.</td></tr>";
     }
 
     // Tables render GET /api/state as-is (newest first). Do not reverse or append.
@@ -479,6 +513,7 @@
         return;
       }
       kickState();
+      kickPrs();
     }
 
     function kickState() {
@@ -517,6 +552,28 @@
         err.hidden = false;
         err.textContent = e.name === "AbortError" ? "Timed out loading sessions." : String(e);
         stateInflight = null;
+      });
+      return p;
+    }
+
+    function kickPrs() {
+      if (prsInflight) return prsInflight.p;
+      const prsCtl = new AbortController();
+      const gen = ++prsGen;
+      const p = jsonGet("/api/prs", prsCtl, 25000);
+      prsInflight = { ctl: prsCtl, p, gen };
+      p.then(prData => {
+        if (!prsInflight || prsInflight.gen !== gen) return;
+        const openPrs = prData.prs || [];
+        document.getElementById("k-prs").textContent = openPrs.length;
+        fillPrs(openPrs, prData.source);
+        prsInflight = null;
+      }).catch(e => {
+        if (!prsInflight || prsInflight.gen !== gen) return;
+        document.getElementById("k-prs").textContent = "–";
+        document.getElementById("prs-sub").textContent = e.name === "AbortError" ? "Timed out loading PRs." : String(e);
+        document.querySelector("#prs tbody").innerHTML = "<tr><td colspan='6'>—</td></tr>";
+        prsInflight = null;
       });
       return p;
     }
