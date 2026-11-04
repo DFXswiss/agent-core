@@ -16,7 +16,8 @@ CREATE TABLE IF NOT EXISTS device (
   name TEXT NOT NULL,
   token_id TEXT NOT NULL UNIQUE,
   created_at TEXT NOT NULL,
-  revoked_at TEXT
+  revoked_at TEXT,
+  confirmed_by TEXT
 );
 
 CREATE TABLE IF NOT EXISTS pending_pair (
@@ -83,7 +84,13 @@ class Store:
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.execute("PRAGMA journal_mode = WAL")
         self._conn.executescript(SCHEMA)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        device_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(device)")}
+        if "confirmed_by" not in device_columns:
+            self._conn.execute("ALTER TABLE device ADD COLUMN confirmed_by TEXT")
 
     def close(self) -> None:
         with self._lock:

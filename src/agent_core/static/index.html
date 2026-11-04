@@ -116,6 +116,11 @@
     #session-controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 12px 0; }
     #session-meta { color: var(--meta); font-size: 0.92rem; }
     #device-offline { color: var(--warn); font-weight: 600; margin: 0; }
+    .agent-card { background: var(--surface); border: 1px solid var(--surface-border); border-radius: 8px; padding: 14px; margin-bottom: 16px; }
+    .agent-card h3 { margin-top: 0; }
+    .agent-card textarea { width: min(100%, 760px); min-height: 100px; box-sizing: border-box; }
+    .assignment { border-top: 1px solid var(--table-rule); margin-top: 12px; padding-top: 12px; }
+    .comments { margin: 8px 0; padding-left: 20px; }
   </style>
 </head>
 <body>
@@ -148,7 +153,8 @@
       <button class="secondary" id="logout" type="button">Sign out</button>
     </div>
     <div id="pair-box" class="hidden">
-      <p>Confirm pairing this device to your GitHub account.</p>
+      <p>Confirm pairing this device.</p>
+      <label>Pair as <select id="pair-as"></select></label>
       <button type="button" id="confirm-pair">Pair this device</button>
       <p id="pair-msg"></p>
     </div>
@@ -158,21 +164,30 @@
       <div class="kpi"><span>Open tasks</span><b id="k-tasks">–</b></div>
       <div class="kpi"><span>Working agents</span><b id="k-agents">–</b></div>
       <div class="kpi"><span>Open pings</span><b id="k-pings">–</b></div>
-      <div class="kpi"><span>Grok usage</span><b id="k-usage">–</b></div>
+      <div class="kpi"><span>Usage</span><b id="k-usage">–</b></div>
     </div>
     <h2>Pull requests</h2>
     <p class="sub" id="prs-sub">Open PRs authored or assigned to people you can see.</p>
     <table id="prs"><thead><tr><th>Author</th><th>Org</th><th>Repo</th><th>PR</th><th>Description</th><th>Status</th></tr></thead><tbody></tbody></table>
     <h2>Usage</h2>
-    <table id="usage">
+    <h3>Lane tokens</h3>
+    <table id="lane-usage">
       <thead>
         <tr>
-          <th>Owner</th><th>Email</th><th>Provider</th><th>Tier</th>
-          <th>Used</th><th>Reset</th><th>Fetched</th>
+          <th>Owner</th><th>Session</th><th>Provider</th><th>Model</th><th>Runs</th>
+          <th>Input</th><th>Output</th><th>Cache read</th><th>Cache create</th><th>Last</th>
         </tr>
       </thead>
       <tbody></tbody>
     </table>
+    <h3>OpenRouter accounts</h3>
+    <table id="account-usage"><thead><tr><th>Owner</th><th>Account</th><th>Used</th><th>Daily</th><th>Weekly</th><th>Monthly</th><th>Limit</th><th>Remaining</th><th>Fetched</th></tr></thead><tbody></tbody></table>
+    <h3>Grok</h3>
+    <table id="usage"><thead><tr><th>Owner</th><th>Email</th><th>Provider</th><th>Tier</th><th>Used</th><th>Reset</th><th>Fetched</th></tr></thead><tbody></tbody></table>
+    <section id="agents-section" class="hidden">
+      <h2>Agents</h2>
+      <div id="agents-list"></div>
+    </section>
     <h2>Sessions</h2>
     <table id="sessions"><thead><tr><th>Owner</th><th>Id</th><th>Kind</th><th>Status</th><th>Host</th><th>Last seen</th><th>Control</th></tr></thead><tbody></tbody></table>
     <div id="session-detail" class="hidden">
@@ -212,7 +227,7 @@
     <h2>Pings</h2>
     <table id="pings"><thead><tr><th>From</th><th>To</th><th>Kind</th><th>Task</th><th>Acked</th><th></th></tr></thead><tbody></tbody></table>
     <h2>Devices</h2>
-    <table id="devices"><thead><tr><th>Owner</th><th>Name</th><th>Id</th><th>Created</th></tr></thead><tbody></tbody></table>
+    <table id="devices"><thead><tr><th>Owner</th><th>Name</th><th>Id</th><th>Created</th><th>Confirmed by</th></tr></thead><tbody></tbody></table>
   </div>
   <script>
     function esc(s) {
@@ -255,6 +270,9 @@
     let stateGen = 0;
     let prsInflight = null;
     let prsGen = 0;
+    let usageInflight = null;
+    let usageGen = 0;
+    let agentRenderGen = 0;
 
     async function me() {
       const res = await fetch("/auth/me");
@@ -266,8 +284,10 @@
     function abortHubFetches() {
       const s = stateInflight; stateInflight = null;
       const p = prsInflight; prsInflight = null;
+      const u = usageInflight; usageInflight = null;
       if (s) s.ctl.abort();
       if (p) p.ctl.abort();
+      if (u) u.ctl.abort();
     }
 
     function clearHubTables() {
@@ -280,9 +300,13 @@
       document.getElementById("stamp").textContent = "";
       fillSessions([]);
       fillUsage([]);
+      fillLaneUsage([]);
+      fillAccountUsage([]);
       fill("tasks", [], ["_github_login", "title", "state", "current_round", "workflow"]);
       fill("pings", [], ["from_login", "to_login", "kind", "task_id", "acked_at", "_ack"]);
-      fill("devices", [], ["github_login", "name", "id", "created_at"]);
+      fill("devices", [], ["github_login", "name", "id", "created_at", "confirmed_by"]);
+      document.getElementById("agents-section").classList.add("hidden");
+      document.getElementById("agents-list").innerHTML = "";
       document.querySelector("#prs tbody").innerHTML = "<tr><td colspan='6'>—</td></tr>";
       closeSessionDetail();
     }
@@ -340,7 +364,7 @@
         const status = s.status ?? "";
         return `<tr class="session-row" data-session-id="${esc(s.id)}">
           <td>${esc(s._github_login)}</td>
-          <td>${esc(s.id)}</td>
+          <td><a href="/sessions/${encodeURIComponent(s.id)}">${esc(s.id)}</a></td>
           <td>${esc(s.kind)}</td>
           <td class="${esc(status)}">${esc(status)}</td>
           <td>${esc(s.host)}</td>
@@ -385,6 +409,78 @@
           "<td>" + esc(payload.fetched_at) + "</td>" +
           "</tr>";
       }).join("") || "<tr><td colspan='7'>—</td></tr>";
+    }
+
+    function fillLaneUsage(rows) {
+      const tb = document.querySelector("#lane-usage tbody");
+      tb.innerHTML = (rows || []).map(row => `<tr>
+        <td>${esc(row.login)}</td><td><a href="/sessions/${encodeURIComponent(row.session_id || "")}">${esc(row.session_id)}</a></td>
+        <td>${esc(row.provider)}</td><td>${esc(row.model)}</td><td>${esc(row.runs)}</td>
+        <td>${esc(row.input_tokens)}</td><td>${esc(row.output_tokens)}</td>
+        <td>${esc(row.cache_read_input_tokens)}</td><td>${esc(row.cache_creation_input_tokens)}</td><td>${esc(row.last_at)}</td>
+      </tr>`).join("") || "<tr><td colspan='10'>—</td></tr>";
+    }
+
+    function usd(value) {
+      return typeof value === "number" ? "$" + value.toFixed(4) : (value ?? "");
+    }
+
+    function fillAccountUsage(rows) {
+      const tb = document.querySelector("#account-usage tbody");
+      tb.innerHTML = (rows || []).map(row => `<tr>
+        <td>${esc(row.login)}</td><td>${esc(row.account)}</td><td>${esc(usd(row.usage_usd))}</td>
+        <td>${esc(usd(row.usage_daily_usd))}</td><td>${esc(usd(row.usage_weekly_usd))}</td>
+        <td>${esc(usd(row.usage_monthly_usd))}</td><td>${esc(usd(row.limit_usd))}</td>
+        <td>${esc(usd(row.limit_remaining_usd))}</td><td>${esc(row.fetched_at)}</td>
+      </tr>`).join("") || "<tr><td colspan='9'>—</td></tr>";
+    }
+
+    function agentTaskSummary(agent, state) {
+      return (state.task || []).filter(task => task._github_login === agent && task.state !== "done" && task.state !== "failed").map(task => {
+        const coordinator = task.coordinator || {};
+        const phase = coordinator.phase || task.phase || "";
+        const blocker = coordinator.blocker || task.blocker || "";
+        return `<li>${esc(task.title || task.id)} — ${esc(task.state)} / ${esc(phase)}${blocker ? " — " + esc(blocker) : ""}</li>`;
+      }).join("") || "<li>No current coordinator tasks.</li>";
+    }
+
+    async function renderAgents(agents, state) {
+      const generation = ++agentRenderGen;
+      const section = document.getElementById("agents-section");
+      const list = document.getElementById("agents-list");
+      const owned = Array.isArray(agents) ? agents : [];
+      section.classList.toggle("hidden", owned.length === 0);
+      if (!owned.length) { list.innerHTML = ""; return; }
+      const assignmentSets = await Promise.all(owned.map(async agent => {
+        try {
+          const res = await fetch("/api/assignments?agent=" + encodeURIComponent(agent));
+          if (!res.ok) return [];
+          return (await res.json()).assignments || [];
+        } catch (e) { return []; }
+      }));
+      if (generation !== agentRenderGen || section.contains(document.activeElement)) return;
+      list.innerHTML = owned.map((agent, index) => {
+        const sessions = (state.session || []).filter(s => s._github_login === agent).map(s =>
+          `<li><a href="/sessions/${encodeURIComponent(s.id)}">${esc(s.id)}</a> — ${esc(s.status)}</li>`
+        ).join("") || "<li>No sessions.</li>";
+        const assignments = assignmentSets[index].map(a => {
+          const comments = (a.comments || []).map(c => `<li><b>${esc(c.author)}</b> ${esc(c.created_at)}<br>${esc(c.body)}</li>`).join("") || "<li>No comments.</li>";
+          return `<div class="assignment">
+            <a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.repo)}#${esc(a.number)} — ${esc(a.title)}</a>
+            <span>${esc(a.state)}</span><ul class="comments">${comments}</ul>
+            <form class="reply-form" data-repo="${esc(a.repo)}" data-number="${esc(a.number)}">
+              <input name="body" required maxlength="60000" placeholder="Reply as yourself"><button type="submit">Reply</button>
+            </form>
+          </div>`;
+        }).join("") || "<p>No assignments.</p>";
+        return `<div class="agent-card"><h3>@${esc(agent)}</h3>
+          <h4>Sessions</h4><ul>${sessions}</ul><h4>Coordinator tasks</h4><ul>${agentTaskSummary(agent, state)}</ul>
+          <h4>Assign task</h4><form class="assign-form" data-agent="${esc(agent)}">
+            <label>Repository <input name="repo" required placeholder="Owner/Name"></label>
+            <label>Title <input name="title" required maxlength="256"></label>
+            <label>Body <textarea name="body" required maxlength="60000"></textarea></label><button type="submit">Assign</button>
+          </form><h4>Assignments</h4>${assignments}</div>`;
+      }).join("");
     }
 
     function setControlEnabled(online) {
@@ -501,10 +597,18 @@
           clearHubTables();
         }
         window.__login = user.login;
+        window.__ownedAgents = user.owned_agents || [];
         document.getElementById("who").textContent = user.login;
         document.getElementById("team-list").textContent = user.teams.length ? user.teams.join(", ") : "none (self only)";
         document.getElementById("k-people").textContent = (user.visible || []).length;
-        if (challenge) document.getElementById("pair-box").classList.remove("hidden");
+        if (challenge) {
+          document.getElementById("pair-box").classList.remove("hidden");
+          const pairAs = document.getElementById("pair-as");
+          const choices = [user.login].concat(user.owned_agents || []);
+          const selected = pairAs.value;
+          pairAs.innerHTML = choices.map(value => `<option value="${esc(value)}">${esc(value)}</option>`).join("");
+          if (choices.includes(selected)) pairAs.value = selected;
+        }
       } catch (e) {
         if (gen !== renderGen) return;
         abortHubFetches();
@@ -514,6 +618,7 @@
       }
       kickState();
       kickPrs();
+      kickUsage();
     }
 
     function kickState() {
@@ -538,13 +643,8 @@
         updateOpenSessionFromState(data.session || []);
         fill("tasks", data.task || [], ["_github_login", "title", "state", "current_round", "workflow"]);
         fill("pings", data.pings || [], ["from_login", "to_login", "kind", "task_id", "acked_at", "_ack"]);
-        fill("devices", (data.devices || []).filter(d => !d.revoked_at), ["github_login", "name", "id", "created_at"]);
-        fillUsage(data.activity || []);
-        const own = latestUsageRows(data.activity || []).find(r => r._github_login === data.login);
-        const ownPct = own && own.payload && typeof own.payload.used_percent === "number"
-          ? own.payload.used_percent + "%"
-          : "–";
-        document.getElementById("k-usage").textContent = ownPct;
+        fill("devices", (data.devices || []).filter(d => !d.revoked_at), ["github_login", "name", "id", "created_at", "confirmed_by"]);
+        renderAgents(window.__ownedAgents || [], data);
         stateInflight = null;
       }).catch(e => {
         if (!stateInflight || stateInflight.gen !== gen) return;
@@ -552,6 +652,27 @@
         err.hidden = false;
         err.textContent = e.name === "AbortError" ? "Timed out loading sessions." : String(e);
         stateInflight = null;
+      });
+      return p;
+    }
+
+    function kickUsage() {
+      if (usageInflight) return usageInflight.p;
+      const usageCtl = new AbortController();
+      const gen = ++usageGen;
+      const p = jsonGet("/api/usage", usageCtl, 15000);
+      usageInflight = { ctl: usageCtl, p, gen };
+      p.then(data => {
+        if (!usageInflight || usageInflight.gen !== gen) return;
+        fillLaneUsage(data.lanes || []);
+        fillAccountUsage(data.accounts || []);
+        fillUsage(data.grok || []);
+        const tokenTotal = (data.lanes || []).reduce((sum, row) => sum + (row.input_tokens || 0) + (row.output_tokens || 0), 0);
+        document.getElementById("k-usage").textContent = tokenTotal;
+        usageInflight = null;
+      }).catch(e => {
+        if (!usageInflight || usageInflight.gen !== gen) return;
+        usageInflight = null;
       });
       return p;
     }
@@ -583,10 +704,13 @@
       location.href = "/";
     };
     document.getElementById("confirm-pair").onclick = async () => {
+      const selected = document.getElementById("pair-as").value;
+      const payload = { challenge };
+      if (selected && selected !== window.__login) payload.as_login = selected;
       const res = await fetch("/pair/confirm", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ challenge }),
+        body: JSON.stringify(payload),
       });
       const body = await res.json();
       document.getElementById("pair-msg").textContent = res.ok
@@ -621,6 +745,27 @@
       postControl({ action: "input", data });
     };
     document.getElementById("ctrl-c").onclick = () => postControl({ action: "input", key: "ctrl-c" });
+    document.addEventListener("submit", async (ev) => {
+      const form = ev.target;
+      if (!form || !form.classList) return;
+      if (form.classList.contains("assign-form")) {
+        ev.preventDefault();
+        const fd = new FormData(form);
+        const payload = { agent: form.dataset.agent, repo: fd.get("repo"), title: fd.get("title"), body: fd.get("body") };
+        const res = await fetch("/api/assignments", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+        if (!res.ok) { document.getElementById("err").hidden = false; document.getElementById("err").textContent = (await res.json()).detail || "assignment failed"; return; }
+        form.reset(); render(); return;
+      }
+      if (form.classList.contains("reply-form")) {
+        ev.preventDefault();
+        const fd = new FormData(form);
+        const parts = (form.dataset.repo || "").split("/");
+        const url = "/api/assignments/" + encodeURIComponent(parts[0]) + "/" + encodeURIComponent(parts[1]) + "/" + encodeURIComponent(form.dataset.number) + "/comments";
+        const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ body: fd.get("body") }) });
+        if (!res.ok) { document.getElementById("err").hidden = false; document.getElementById("err").textContent = (await res.json()).detail || "reply failed"; return; }
+        form.reset(); render();
+      }
+    });
     document.addEventListener("click", async (ev) => {
       const t = ev.target;
       if (!t || !t.getAttribute) return;
@@ -631,7 +776,7 @@
         return;
       }
       const row = t.closest && t.closest("tr.session-row");
-      if (row && row.getAttribute("data-session-id")) {
+      if (row && row.getAttribute("data-session-id") && !(t.closest && t.closest("a"))) {
         try {
           await openSession(row.getAttribute("data-session-id"));
         } catch (e) {

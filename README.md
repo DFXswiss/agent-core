@@ -45,9 +45,16 @@ teams:
   dfx:
     members:
       - your-github-login
+
+agents:
+  agent-github-login:
+    owners:
+      - owner-github-login
 ```
 
 Logins are compared in lowercase. A login that appears on no team still signs in and still syncs; they only see themselves.
+
+The optional `agents` map declares GitHub logins operated by autonomous agents. An agent must be a team member, and each owner must share at least one team with that agent. Owners can pair a device as the agent from the website, control its sessions, create GitHub issue assignments, and reply to assignment comments. An agent cannot own itself, duplicate owners are rejected, and a malformed roster fails closed at startup.
 
 ## Protocol
 
@@ -55,7 +62,20 @@ See [PROTOCOL.md](PROTOCOL.md).
 
 ## Control
 
-Anyone who can see a session may watch its live terminal on the website. Start, stop, type, and resize are allowed only when the signed-in person owns the session's origin device and that device has a control-ready WebSocket. The hub relays control and terminal bytes; it does not run processes and does not author session rows. Details are in [PROTOCOL.md](PROTOCOL.md).
+Anyone who can see a session may watch its live terminal on the website. Start, stop, type, and resize are allowed when the signed-in person owns the session's origin device or owns the agent login paired to that device, and that device has a control-ready WebSocket. The hub relays control and terminal bytes; it does not run processes and does not author session rows. Details are in [PROTOCOL.md](PROTOCOL.md).
+
+## Agent operations
+
+The dashboard shows an **Agents** section to people who own at least one configured agent. It links agent sessions to their chronological timelines, shows current coordinator state, creates assignments, displays issue questions, and posts owner replies. Usage is available in lane-token, OpenRouter-account, and Grok tables.
+
+Website API endpoints are documented in [PROTOCOL.md](PROTOCOL.md):
+
+- `POST /api/assignments` and `GET /api/assignments?agent=<login>`
+- `POST /api/assignments/{owner}/{name}/{number}/comments`
+- `GET /api/usage`
+- `GET /api/sessions/{id}/timeline`
+
+The hub uses only the signed-in human's stored OAuth token for GitHub issue and comment writes. Tokens never enter API responses, activity rows, or browser cookies. Devices remain the sole write owners of their rows; website actions use synthetic `web:<login>` activity origins.
 
 ## Tests
 

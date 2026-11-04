@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from agent_core.teams import TeamsError, load_teams, visible_logins
+from agent_core.teams import TeamsError, load_roster, load_teams, visible_logins
 
 
 def test_load_and_visibility(tmp_path: Path) -> None:
@@ -54,6 +54,8 @@ def test_checked_in_teams_yaml_loads() -> None:
         "jonnyluca",
         "theo-vane",
     ]
+    roster = load_roster(path)
+    assert roster.agents == {"jonnyluca": frozenset({"taprootfreak", "taprootfreakai"})}
 
 
 def test_missing_teams_key(tmp_path: Path) -> None:
@@ -61,3 +63,45 @@ def test_missing_teams_key(tmp_path: Path) -> None:
     path.write_text("other: 1\n", encoding="utf-8")
     with pytest.raises(TeamsError, match="top-level"):
         load_teams(path)
+
+
+def test_valid_agents_block(tmp_path: Path) -> None:
+    path = tmp_path / "teams.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "teams": {"dfx": {"members": ["Owner", "AgentBot"]}},
+                "agents": {"AgentBot": {"owners": ["Owner"]}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    roster = load_roster(path)
+    assert roster.agents == {"agentbot": frozenset({"owner"})}
+    assert roster.is_agent("AgentBot")
+    assert roster.agent_owners("agentbot") == {"owner"}
+    assert roster.owns_agent("OWNER", "AGENTBOT")
+
+
+@pytest.mark.parametrize(
+    ("teams", "agents", "message"),
+    [
+        ({"dfx": {"members": ["owner"]}}, {"bot": {"owners": ["owner"]}}, "member"),
+        (
+            {"one": {"members": ["bot"]}, "two": {"members": ["owner"]}},
+            {"bot": {"owners": ["owner"]}},
+            "share a team",
+        ),
+        ({"dfx": {"members": ["bot"]}}, {"bot": {"owners": ["bot"]}}, "own itself"),
+        (
+            {"dfx": {"members": ["bot", "owner"]}},
+            {"bot": {"owners": ["owner", "OWNER"]}},
+            "twice",
+        ),
+    ],
+)
+def test_invalid_agents_fail_closed(tmp_path: Path, teams: dict, agents: dict, message: str) -> None:
+    path = tmp_path / "teams.yaml"
+    path.write_text(yaml.safe_dump({"teams": teams, "agents": agents}), encoding="utf-8")
+    with pytest.raises(TeamsError, match=message):
+        load_roster(path)

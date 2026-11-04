@@ -11,6 +11,7 @@ import httpx
 from .config import Config
 
 GITHUB_SEARCH_URL = "https://api.github.com/search/issues"
+GITHUB_API_URL = "https://api.github.com"
 
 
 class GitHubError(ValueError):
@@ -31,6 +32,26 @@ class GitHub:
         raise NotImplementedError
 
     def search_open_prs(self, token: str, logins: list[str]) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    def create_issue(
+        self, token: str, repo: str, title: str, body: str, assignees: list[str]
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def issue(self, token: str, repo: str, number: int) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def add_assignees(self, token: str, repo: str, number: int, assignees: list[str]) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def create_issue_comment(self, token: str, repo: str, number: int, body: str) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def issue_events(self, token: str, repo: str, number: int) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    def issue_comments(self, token: str, repo: str, number: int) -> list[dict[str, Any]]:
         raise NotImplementedError
 
 
@@ -156,6 +177,97 @@ class RealGitHub(GitHub):
             out.append(row)
         return out
 
+    def _request_json(
+        self,
+        method: str,
+        path: str,
+        token: str,
+        *,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+        expected: tuple[int, ...] = (200,),
+    ) -> Any:
+        resp = httpx.request(
+            method,
+            f"{GITHUB_API_URL}{path}",
+            json=json_body,
+            params=params,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            timeout=20.0,
+        )
+        if resp.status_code not in expected:
+            message = ""
+            try:
+                raw_message = resp.json().get("message")
+                if isinstance(raw_message, str):
+                    message = ": " + raw_message[:500]
+            except Exception:
+                pass
+            raise GitHubError(f"GitHub request failed: HTTP {resp.status_code}{message}")
+        try:
+            return resp.json()
+        except Exception as exc:
+            raise GitHubError(f"GitHub request failed: HTTP {resp.status_code} returned invalid JSON") from exc
+
+    def create_issue(
+        self, token: str, repo: str, title: str, body: str, assignees: list[str]
+    ) -> dict[str, Any]:
+        result = self._request_json(
+            "POST",
+            f"/repos/{repo}/issues",
+            token,
+            json_body={"title": title, "body": body, "assignees": assignees},
+            expected=(201,),
+        )
+        if not isinstance(result, dict):
+            raise GitHubError("GitHub issue creation returned an invalid response")
+        return result
+
+    def issue(self, token: str, repo: str, number: int) -> dict[str, Any]:
+        result = self._request_json("GET", f"/repos/{repo}/issues/{number}", token)
+        if not isinstance(result, dict):
+            raise GitHubError("GitHub issue lookup returned an invalid response")
+        return result
+
+    def add_assignees(self, token: str, repo: str, number: int, assignees: list[str]) -> dict[str, Any]:
+        result = self._request_json(
+            "POST",
+            f"/repos/{repo}/issues/{number}/assignees",
+            token,
+            json_body={"assignees": assignees},
+        )
+        if not isinstance(result, dict):
+            raise GitHubError("GitHub assignee update returned an invalid response")
+        return result
+
+    def create_issue_comment(self, token: str, repo: str, number: int, body: str) -> dict[str, Any]:
+        result = self._request_json(
+            "POST",
+            f"/repos/{repo}/issues/{number}/comments",
+            token,
+            json_body={"body": body},
+            expected=(201,),
+        )
+        if not isinstance(result, dict):
+            raise GitHubError("GitHub comment creation returned an invalid response")
+        return result
+
+    def issue_events(self, token: str, repo: str, number: int) -> list[dict[str, Any]]:
+        result = self._request_json(
+            "GET", f"/repos/{repo}/issues/{number}/events", token, params={"per_page": 100}
+        )
+        return [item for item in result if isinstance(item, dict)] if isinstance(result, list) else []
+
+    def issue_comments(self, token: str, repo: str, number: int) -> list[dict[str, Any]]:
+        result = self._request_json(
+            "GET", f"/repos/{repo}/issues/{number}/comments", token, params={"per_page": 100}
+        )
+        return [item for item in result if isinstance(item, dict)] if isinstance(result, list) else []
+
 
 class FakeGitHub(GitHub):
     """Maps authorization codes to logins. Used only by tests."""
@@ -166,6 +278,11 @@ class FakeGitHub(GitHub):
         self._codes = {k: v.strip().lower() for k, v in codes.items()}
         self._prs = list(prs or [])
         self.search_status = 200
+        self.issues: dict[tuple[str, int], dict[str, Any]] = {}
+        self.comments: dict[tuple[str, int], list[dict[str, Any]]] = {}
+        self.issue_calls: list[dict[str, Any]] = []
+        self.omit_assignees_on_create = False
+        self.omit_assignees_after_add = False
 
     def authorize_url(self, state: str, redirect_uri: str) -> str:
         return f"https://github.test/login/oauth/authorize?state={state}&redirect_uri={redirect_uri}"
@@ -188,3 +305,84 @@ class FakeGitHub(GitHub):
             if str(p.get("author", "")).lower() in allowed
             or str(p.get("assignee", "")).lower() in allowed
         ]
+
+    def create_issue(
+        self, token: str, repo: str, title: str, body: str, assignees: list[str]
+    ) -> dict[str, Any]:
+        number = 1 + max((n for r, n in self.issues if r == repo), default=0)
+        assigned = [] if self.omit_assignees_on_create else [{"login": a} for a in assignees]
+        issue = {
+            "number": number,
+            "html_url": f"https://github.test/{repo}/issues/{number}",
+            "state": "open",
+            "title": title,
+            "body": body,
+            "assignees": assigned,
+        }
+        self.issues[(repo, number)] = issue
+        self.issue_calls.append(
+            {
+                "operation": "create_issue",
+                "token": token,
+                "repo": repo,
+                "title": title,
+                "body": body,
+                "assignees": list(assignees),
+            }
+        )
+        return dict(issue)
+
+    def issue(self, token: str, repo: str, number: int) -> dict[str, Any]:
+        self.issue_calls.append({"operation": "issue", "token": token, "repo": repo, "number": number})
+        issue = self.issues.get((repo, number))
+        if issue is None:
+            raise GitHubError("GitHub request failed: HTTP 404: Not Found")
+        return dict(issue)
+
+    def add_assignees(self, token: str, repo: str, number: int, assignees: list[str]) -> dict[str, Any]:
+        self.issue_calls.append(
+            {
+                "operation": "add_assignees",
+                "token": token,
+                "repo": repo,
+                "number": number,
+                "assignees": list(assignees),
+            }
+        )
+        issue = self.issues.get((repo, number))
+        if issue is None:
+            raise GitHubError("GitHub request failed: HTTP 404: Not Found")
+        if not self.omit_assignees_after_add:
+            issue["assignees"] = [{"login": a} for a in assignees]
+        return dict(issue)
+
+    def create_issue_comment(self, token: str, repo: str, number: int, body: str) -> dict[str, Any]:
+        if (repo, number) not in self.issues:
+            raise GitHubError("GitHub request failed: HTTP 404: Not Found")
+        author = token.removeprefix("tok-") if token.startswith("tok-") else "unknown"
+        comment = {
+            "html_url": f"https://github.test/{repo}/issues/{number}#issuecomment-{len(self.comments.get((repo, number), [])) + 1}",
+            "user": {"login": author},
+            "created_at": "2026-11-04T12:00:00Z",
+            "body": body,
+        }
+        self.comments.setdefault((repo, number), []).append(comment)
+        self.issue_calls.append(
+            {
+                "operation": "create_issue_comment",
+                "token": token,
+                "repo": repo,
+                "number": number,
+                "body": body,
+            }
+        )
+        return dict(comment)
+
+    def issue_events(self, token: str, repo: str, number: int) -> list[dict[str, Any]]:
+        return []
+
+    def issue_comments(self, token: str, repo: str, number: int) -> list[dict[str, Any]]:
+        self.issue_calls.append(
+            {"operation": "issue_comments", "token": token, "repo": repo, "number": number}
+        )
+        return [dict(comment) for comment in self.comments.get((repo, number), [])]

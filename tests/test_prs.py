@@ -153,7 +153,7 @@ def test_prs_survive_new_hub(cfg, github: FakeGitHub) -> None:
 def test_auth_me_has_no_token(hub, cfg) -> None:
     sign_in(hub, "code-alice")
     me = hub.get("/auth/me").json()
-    assert set(me) == {"login", "visible", "teams"}
+    assert set(me) == {"login", "visible", "teams", "owned_agents"}
     assert "token" not in me and "github_token" not in me
     raw = hub.cookies["session"]
     data = TimestampSigner(cfg.session_secret).unsign(

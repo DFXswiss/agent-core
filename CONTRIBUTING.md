@@ -13,6 +13,8 @@
 
 Every list on the website, and every array of rows in `GET /api/state`, is **newest first**. Newest means the latest change, not insertion order and not alphabetical id.
 
+The sole exception is `GET /api/sessions/{id}/timeline`: a timeline is a log and is therefore oldest first.
+
 - Store tables (`session`, `task`, `pings`, and the other replica keys in `/api/state`): `row_replica.updated_at` descending, then `row_id` descending.
 - Devices: `created_at` descending, then `id` descending.
 

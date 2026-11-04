@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -54,6 +55,30 @@ def github() -> FakeGitHub:
 def hub(cfg: Config, github: FakeGitHub) -> TestClient:
     app = create_app(cfg, github=github, store=Store(cfg.database))
     return TestClient(app)
+
+
+@pytest.fixture
+def agent_hub(cfg: Config, tmp_path: Path) -> TestClient:
+    roster_path = tmp_path / "agents-teams.yaml"
+    roster_path.write_text(
+        yaml.safe_dump(
+            {
+                "teams": {"dfx": {"members": ["alice", "bob", "helperbot"]}},
+                "agents": {"helperbot": {"owners": ["alice"]}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    agent_cfg = replace(cfg, teams_path=roster_path, database=str(tmp_path / "agent-hub.sqlite"))
+    github = FakeGitHub(
+        {
+            "code-alice": "alice",
+            "code-bob": "bob",
+            "code-dave": "dave",
+            "code-helperbot": "helperbot",
+        }
+    )
+    return TestClient(create_app(agent_cfg, github=github, store=Store(agent_cfg.database)))
 
 
 def sign_in(client: TestClient, code: str) -> None:

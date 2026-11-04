@@ -9,14 +9,15 @@ Anyone may sign in with GitHub. Authorization is not the login; it is team membe
 - A user always reads and writes their own store.
 - A user listed on a team in `teams.yaml` also reads every member of that team.
 - Membership changes only through a pull request to `teams.yaml`.
+- The optional top-level `agents` map assigns owners to agent GitHub logins. Agent and owner logins are lowercase, the agent must belong to a team, and every owner must share a team with it. Duplicate owners, self-ownership, and invalid references fail closed.
 
 ## Device pairing
 
 1. `POST /pair/prepare` with `{device_id, challenge, device_name}`.
-2. Open `/pair?challenge=...` in a browser, sign in, `POST /pair/confirm`.
+2. Open `/pair?challenge=...` in a browser, sign in, `POST /pair/confirm`. The body may include `as_login` for an agent owned by the signed-in person.
 3. Client polls `GET /pair/wait?device_id&challenge` until `{status: "paired", token, login}`.
 
-The token is a device credential. It is not a GitHub token. The hub binds `origin_device_id` to the GitHub login of the session that confirmed the pair. The client cannot choose that login.
+The token is a device credential. It is not a GitHub token. Normally the hub binds `origin_device_id` to the signed-in GitHub login. An owner may select one of their configured agents on the pair page; the device and token are then bound to that agent. Unknown agents return 404 and non-owners return 403. The device row records the human confirmer as `confirmed_by`, including for normal pairing.
 
 ## Events
 
@@ -140,7 +141,7 @@ The hub is a relay only. It does not run tmux, does not start processes, and doe
 ### Ownership and visibility
 
 - A session is **visible** to a viewer when the replica's `github_login` is in `hub.visible(viewer)` (self plus teammates from `teams.yaml`).
-- `can_control(login, origin_device_id)` is true only when a `device` row exists with `id == origin_device_id`, `revoked_at IS NULL`, and `github_login == login`. That is **own-device only**: another teammate may watch a session; only the person who owns the origin device may start, stop, type, or resize.
+- `can_control(login, origin_device_id)` is true only when a non-revoked device row exists and either its `github_login` equals `login` or `login` owns that agent login. Other teammates may watch but may not control.
 - Unknown or non-visible session ids return **404** (no existence leak across teams).
 
 ### Session state fields
@@ -254,12 +255,47 @@ Otherwise JSON snapshot:
 
 Cookie session after GitHub OAuth.
 
-- `GET /auth/me` — login, visible logins, teams. GitHub OAuth is sign-in and PR-search (`read:user repo`); the token is not in the cookie.
+- `GET /auth/me` — login, visible logins, teams, and `owned_agents`. GitHub OAuth is sign-in and GitHub API access (`read:user repo`); the token is not in the cookie.
 - `GET /api/prs` — open GitHub pull requests authored or assigned to visible logins. Search uses the signed-in user's OAuth token (scope `read:user repo`), stored in hub sqlite (`oauth_token`) and memory, not in the cookie. `source` is `github` or `none` (signed in, but no token — sign in again). Columns: author, org, repo, number, title, status (`open`|`draft`), url. `truncated` is true when 50 rows were returned.
-- `GET /api/state` — materialized rows the caller may see (sessions include `can_control` and `control_connected`). The signed-in website leads with `/api/prs`, then replica tables from `/api/state`. Replica arrays are newest-first (`updated_at` descending, then `row_id`). `devices` is newest-first (`created_at` descending, then `id`).
+- `GET /api/state` — materialized rows the caller may see (sessions include `can_control` and `control_connected`; devices include nullable `confirmed_by`). The signed-in website leads with `/api/prs`, then replica tables from `/api/state`. Replica arrays are newest-first (`updated_at` descending, then `row_id`). `devices` is newest-first (`created_at` descending, then `id`).
 - `GET /api/sessions/{id}` — one visible session plus control flags.
-- `POST /api/sessions/{id}/control` — start / stop / input / resize (owner device only).
+- `POST /api/sessions/{id}/control` — start / stop / input / resize (device login or configured agent owner only).
 - `GET /api/sessions/{id}/terminal` — JSON ring snapshot or SSE terminal stream.
+- `GET /api/sessions/{id}/timeline` — all related replica rows, oldest first, capped at 5,000 with `truncated: true` when capped.
+- `POST /api/assignments` — create and verify an agent-assigned GitHub issue using the owner's OAuth token.
+- `GET /api/assignments?agent=<login>` — newest-first assignment activity, enriched best-effort with issue state, assignees, and the newest 20 comments.
+- `POST /api/assignments/{owner}/{name}/{number}/comments` — reply using an owner OAuth token after a fresh assignee check.
+- `GET /api/usage` — lane-token aggregates, newest OpenRouter account snapshots, and unchanged Grok snapshot rows.
 - `POST /api/pings` — `{to, kind, task_id?, body?}`; `kind` is `review-request|ping|question`. Target must be visible.
 - `POST /api/pings/{id}/ack` — recipient only.
 - `GET /api/stream` — server-sent events for the signed-in browser.
+
+### Assignments
+
+`POST /api/assignments` accepts a website cookie or device bearer and this body:
+
+```json
+{"agent":"agent-login","repo":"Owner/Name","title":"Work title","body":"Work details"}
+```
+
+The actor must own the agent. A bearer belonging to an agent is refused. Repository names use `Owner/Name`; titles are 1..256 characters and bodies are 1..60000. A missing stored OAuth token returns 409 with a request to sign in on the website. The hub creates one issue with the agent in `assignees`, verifies the resulting issue, retries the assignee endpoint once if needed, and returns the issue URL on a final 502 so callers do not recreate it blindly. The issue body ends with `Assigned through <public URL> by @<actor>.` Success is 201:
+
+```json
+{"repo":"Owner/Name","number":42,"url":"https://github.com/Owner/Name/issues/42","agent":"agent-login","actor":"owner-login"}
+```
+
+Creation records an `activity` replica with type `assignment.created`; replies record `assignment.reply`. Both use `web:<actor>` origins and contain no OAuth token. GitHub transport errors return bounded 502 messages.
+
+### Usage
+
+`GET /api/usage` is cookie-authenticated and covers visible logins:
+
+```json
+{"lanes":[],"accounts":[],"grok":[]}
+```
+
+`lanes` groups `lane.run` activity by login, session, provider, and model, counts every run, sums token fields (missing usage counts as zero), and is newest `last_at` first. `accounts` contains the newest `usage.snapshot` per login, OpenRouter vendor, and account with USD usage and limit fields. `grok` contains the same Grok snapshot row shape previously rendered from `/api/state`.
+
+### Session timeline
+
+`GET /api/sessions/{id}/timeline` returns 404 unless the session is visible. It includes the session, its activities and tasks, and task/session-related `task_round`, `agent`, `checklist_item`, `local_check`, and `review_gate` replicas. Each row has `table`, `row_id`, `at`, and `payload`; `at` prefers `created_at`, `started_at`, `ran_at`, or `recorded_at` and otherwise uses replica `updated_at`. Unlike every dashboard list, the timeline is oldest first. `GET /sessions/{id}` renders lane runs and tool calls, coordinator task phase and blocker information, checks and gates, and assignment links.

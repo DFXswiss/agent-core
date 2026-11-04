@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import secrets
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -15,7 +17,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from .config import Config
 from .db import Store, dumps, loads, row_dict, utcnow
 from .github import GitHub, GitHubError, RealGitHub
-from .teams import load_teams, visible_logins
+from .teams import Roster, load_roster, visible_logins
 from .tokens import TokenError, issue, parse
 
 STATIC = Path(__file__).resolve().parent / "static"
@@ -45,21 +47,26 @@ MAX_SUBSCRIPTIONS = 32
 MAX_MATCH_PREDICATES = 4
 MAX_IN_VALUES = 16
 QUERY_ROW_CAP = 500
+TIMELINE_ROW_CAP = 5000
+ISSUE_CACHE_SECONDS = 60
+REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _MISSING = object()
 
 
 class Hub:
-    def __init__(self, cfg: Config, github: GitHub, store: Store, teams: dict[str, list[str]]) -> None:
+    def __init__(self, cfg: Config, github: GitHub, store: Store, roster: Roster) -> None:
         self.cfg = cfg
         self.github = github
         self.store = store
-        self.teams = teams
+        self.roster = roster
+        self.teams = roster.teams
         self.queues: list[tuple[str, asyncio.Queue[dict[str, Any]]]] = []
         self.device_queues: dict[str, asyncio.Queue[dict[str, Any]]] = {}
         self.control_ready: dict[str, asyncio.Queue[dict[str, Any]]] = {}
         self.terminal_rings: dict[str, list[dict[str, Any]]] = {}
         self.terminal_queues: list[tuple[str, str, asyncio.Queue[dict[str, Any]]]] = []
         self.github_tokens: dict[str, str] = {}
+        self.issue_cache: dict[tuple[str, str, int], tuple[float, dict[str, Any]]] = {}
         for login, token in self.store.all_oauth_tokens():
             self.github_tokens[login] = token
 
@@ -142,15 +149,19 @@ def can_control(hub: Hub, login: str, origin_device_id: str) -> bool:
     if not isinstance(origin_device_id, str) or origin_device_id == "":
         return False
     row = hub.store.query_one(
-        "SELECT id FROM device WHERE id = ? AND revoked_at IS NULL AND github_login = ?",
-        (origin_device_id, login),
+        "SELECT github_login FROM device WHERE id = ? AND revoked_at IS NULL",
+        (origin_device_id,),
     )
-    return row is not None
+    if row is None:
+        return False
+    device_login = row["github_login"]
+    actor = login.strip().lower()
+    return device_login == actor or hub.roster.owns_agent(actor, device_login)
 
 
 def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = None) -> FastAPI:
-    teams = load_teams(cfg.teams_path)
-    hub = Hub(cfg, github or RealGitHub(cfg), store or Store(cfg.database), teams)
+    roster = load_roster(cfg.teams_path)
+    hub = Hub(cfg, github or RealGitHub(cfg), store or Store(cfg.database), roster)
     app = FastAPI(title="agent-core", version="0.1.0")
     app.add_middleware(
         SessionMiddleware,
@@ -208,7 +219,12 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
     @app.get("/auth/me")
     def auth_me(request: Request) -> dict[str, Any]:
         login = hub.session_login(request)
-        return {"login": login, "visible": sorted(hub.visible(login)), "teams": _teams_for(login, hub.teams)}
+        return {
+            "login": login,
+            "visible": sorted(hub.visible(login)),
+            "teams": _teams_for(login, hub.teams),
+            "owned_agents": hub.roster.owned_agents(login),
+        }
 
     @app.post("/pair/prepare")
     def pair_prepare(body: dict[str, Any]) -> dict[str, str]:
@@ -255,6 +271,14 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
     def pair_confirm(request: Request, body: dict[str, Any]) -> dict[str, str]:
         login = hub.session_login(request)
         challenge = _require_str(body, "challenge")
+        paired_login = login
+        if body.get("as_login") is not None:
+            as_login = _require_str(body, "as_login").lower()
+            if not hub.roster.is_agent(as_login):
+                raise HTTPException(status_code=404, detail="unknown agent")
+            if not hub.roster.owns_agent(login, as_login):
+                raise HTTPException(status_code=403, detail="not an owner of that agent")
+            paired_login = as_login
         pending = hub.store.query_one("SELECT * FROM pending_pair WHERE challenge = ?", (challenge,))
         if pending is None:
             raise HTTPException(status_code=404, detail="unknown pairing challenge")
@@ -264,16 +288,17 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         if _age_seconds(created) > PAIR_TTL_SECONDS:
             raise HTTPException(status_code=410, detail="pairing challenge expired")
         token_id = str(uuid.uuid4())
-        token = issue(cfg.session_secret, login, pending["device_id"], token_id)
+        token = issue(cfg.session_secret, paired_login, pending["device_id"], token_id)
         hub.store.execute(
-            "INSERT INTO device (id, github_login, name, token_id, created_at, revoked_at) VALUES (?, ?, ?, ?, ?, NULL)",
-            (pending["device_id"], login, pending["device_name"], token_id, utcnow()),
+            "INSERT INTO device (id, github_login, name, token_id, created_at, revoked_at, confirmed_by) "
+            "VALUES (?, ?, ?, ?, ?, NULL, ?)",
+            (pending["device_id"], paired_login, pending["device_name"], token_id, utcnow(), login),
         )
         hub.store.execute(
             "UPDATE pending_pair SET token = ?, github_login = ? WHERE challenge = ?",
-            (token, login, challenge),
+            (token, paired_login, challenge),
         )
-        return {"status": "paired", "login": login, "device_id": pending["device_id"]}
+        return {"status": "paired", "login": paired_login, "device_id": pending["device_id"]}
 
     def _dashboard_html() -> HTMLResponse:
         page = STATIC / "index.html"
@@ -295,6 +320,15 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
     @app.api_route("/", methods=["GET", "HEAD"])
     def index() -> HTMLResponse:
         return _dashboard_html()
+
+    @app.api_route("/sessions/{session_id}", methods=["GET", "HEAD"])
+    def session_page(request: Request, session_id: str) -> HTMLResponse:
+        login = hub.session_login(request)
+        _visible_session_row(hub, login, session_id)
+        page = STATIC / "session.html"
+        if not page.is_file():
+            raise HTTPException(status_code=500, detail="session page is missing")
+        return HTMLResponse(page.read_text(encoding="utf-8"))
 
     @app.api_route("/favicon.ico", methods=["GET", "HEAD"])
     def favicon_ico() -> FileResponse:
@@ -421,6 +455,153 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         truncated = len(prs) >= 50
         return {"generated_at": utcnow(), "prs": prs, "source": "github", "truncated": truncated}
 
+    @app.post("/api/assignments")
+    async def api_assignment_create(request: Request, body: dict[str, Any]):
+        actor, device_actor = _request_actor(hub, request)
+        if device_actor and hub.roster.is_agent(actor):
+            raise HTTPException(status_code=403, detail="an agent device cannot create assignments")
+        agent = _require_str(body, "agent").lower()
+        if not hub.roster.is_agent(agent):
+            raise HTTPException(status_code=404, detail="unknown agent")
+        if not hub.roster.owns_agent(actor, agent):
+            raise HTTPException(status_code=403, detail="not an owner of that agent")
+        repo = _require_str(body, "repo")
+        if REPO_RE.fullmatch(repo) is None:
+            raise HTTPException(status_code=400, detail="repo must be Owner/Name")
+        title = _bounded_body_string(body, "title", 1, 256)
+        issue_body = _bounded_body_string(body, "body", 1, 60000)
+        token = _github_token(hub, actor)
+        trailer = f"Assigned through {cfg.public_url} by @{actor}."
+        posted_body = issue_body.rstrip() + "\n\n" + trailer
+        url = ""
+        try:
+            created = hub.github.create_issue(token, repo, title, posted_body, [agent])
+            number = created.get("number")
+            created_url = created.get("html_url")
+            if isinstance(number, bool) or not isinstance(number, int) or not isinstance(created_url, str) or not created_url:
+                raise GitHubError("GitHub issue creation returned no issue number or URL")
+            url = created_url
+            current = hub.github.issue(token, repo, number)
+            if agent not in _issue_assignees(current):
+                hub.github.add_assignees(token, repo, number, [agent])
+                current = hub.github.issue(token, repo, number)
+            if agent not in _issue_assignees(current):
+                return JSONResponse(
+                    {
+                        "detail": "GitHub did not retain the requested assignee after one retry",
+                        "url": url,
+                    },
+                    status_code=502,
+                )
+        except GitHubError as exc:
+            if url:
+                return JSONResponse(
+                    {"detail": _bounded_github_error(exc), "url": url},
+                    status_code=502,
+                )
+            raise HTTPException(status_code=502, detail=_bounded_github_error(exc)) from exc
+        activity_id = str(uuid.uuid4())
+        event_payload = {
+            "id": activity_id,
+            "type": "assignment.created",
+            "created_at": utcnow(),
+            "payload": {
+                "agent": agent,
+                "repo": repo,
+                "number": number,
+                "url": url,
+                "title": title,
+                "actor": actor,
+            },
+        }
+        _record_web_event(hub, actor, "activity", "insert", activity_id, event_payload)
+        await hub.publish({"type": "events", "login": actor, "count": 1})
+        return JSONResponse(
+            {"repo": repo, "number": number, "url": url, "agent": agent, "actor": actor},
+            status_code=201,
+        )
+
+    @app.get("/api/assignments")
+    def api_assignments(request: Request, agent: str) -> dict[str, Any]:
+        login = hub.session_login(request)
+        wanted = agent.strip().lower()
+        if not hub.roster.is_agent(wanted) or wanted not in hub.visible(login):
+            raise HTTPException(status_code=404, detail="unknown agent")
+        token = _optional_github_token(hub, login)
+        rows = hub.store.query(
+            "SELECT * FROM row_replica WHERE table_name = 'activity' "
+            "AND github_login IN ({}) ORDER BY updated_at DESC, row_id DESC".format(
+                _placeholders(hub.visible(login))
+            ),
+            tuple(sorted(hub.visible(login))),
+        )
+        assignments: list[dict[str, Any]] = []
+        for row in rows:
+            payload = loads(row["payload"])
+            if not isinstance(payload, dict) or payload.get("type") != "assignment.created":
+                continue
+            inner = payload.get("payload")
+            if not isinstance(inner, dict) or str(inner.get("agent", "")).lower() != wanted:
+                continue
+            item = dict(inner)
+            repo = item.get("repo")
+            number = item.get("number")
+            if isinstance(repo, str) and isinstance(number, int) and not isinstance(number, bool):
+                item.update(_assignment_enrichment(hub, login, token, repo, number))
+            assignments.append(item)
+        return {"agent": wanted, "assignments": assignments}
+
+    @app.post("/api/assignments/{owner}/{name}/{number}/comments")
+    async def api_assignment_reply(
+        request: Request, owner: str, name: str, number: int, body: dict[str, Any]
+    ):
+        actor, _device_actor = _request_actor(hub, request)
+        repo = f"{owner}/{name}"
+        if REPO_RE.fullmatch(repo) is None or number < 1:
+            raise HTTPException(status_code=404, detail="unknown issue")
+        comment_body = _bounded_body_string(body, "body", 1, 60000)
+        token = _github_token(hub, actor)
+        try:
+            issue_row = hub.github.issue(token, repo, number)
+            assigned_agents = {
+                agent
+                for agent in _issue_assignees(issue_row)
+                if hub.roster.is_agent(agent) and hub.roster.owns_agent(actor, agent)
+            }
+            if not assigned_agents:
+                raise HTTPException(status_code=403, detail="not an owner of an agent assigned to this issue")
+            comment = hub.github.create_issue_comment(token, repo, number, comment_body)
+        except HTTPException:
+            raise
+        except GitHubError as exc:
+            raise HTTPException(status_code=502, detail=_bounded_github_error(exc)) from exc
+        url = comment.get("html_url")
+        if not isinstance(url, str) or not url:
+            url = str(issue_row.get("html_url") or "")
+        activity_id = str(uuid.uuid4())
+        event_payload = {
+            "id": activity_id,
+            "type": "assignment.reply",
+            "created_at": utcnow(),
+            "payload": {
+                "agents": sorted(assigned_agents),
+                "repo": repo,
+                "number": number,
+                "url": url,
+                "actor": actor,
+                "body": comment_body,
+            },
+        }
+        _record_web_event(hub, actor, "activity", "insert", activity_id, event_payload)
+        hub.issue_cache.pop((actor, repo, number), None)
+        await hub.publish({"type": "events", "login": actor, "count": 1})
+        return JSONResponse({"url": url}, status_code=201)
+
+    @app.get("/api/usage")
+    def api_usage(request: Request) -> dict[str, Any]:
+        login = hub.session_login(request)
+        return _usage_response(hub, login)
+
     @app.get("/api/state")
     def api_state(request: Request) -> dict[str, Any]:
         login = hub.session_login(request)
@@ -459,7 +640,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                     item["control_connected"] = origin_s in hub.control_ready
             out[key] = items
         devices = hub.store.query(
-            "SELECT id, github_login, name, created_at, revoked_at FROM device "
+            "SELECT id, github_login, name, created_at, revoked_at, confirmed_by FROM device "
             "WHERE github_login IN ({}) "
             "ORDER BY created_at DESC, id DESC".format(_placeholders(allowed)),
             tuple(sorted(allowed)),
@@ -482,6 +663,18 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
             "_origin_device_id": origin,
             "can_control": can_control(hub, login, origin),
             "control_connected": origin in hub.control_ready,
+        }
+
+    @app.get("/api/sessions/{session_id}/timeline")
+    def api_session_timeline(request: Request, session_id: str) -> dict[str, Any]:
+        login = hub.session_login(request)
+        session_row = _visible_session_row(hub, login, session_id)
+        rows = _session_timeline(hub, session_row, hub.visible(login))
+        truncated = len(rows) > TIMELINE_ROW_CAP
+        return {
+            "session_id": session_id,
+            "timeline": rows[:TIMELINE_ROW_CAP],
+            "truncated": truncated,
         }
 
     @app.post("/api/sessions/{session_id}/control")
@@ -809,6 +1002,271 @@ def _record_web_event(
         "ON CONFLICT(table_name, row_id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at",
         (table, row_id, origin, login, encoded, occurred),
     )
+
+
+def _request_actor(hub: Hub, request: Request) -> tuple[str, bool]:
+    header = request.headers.get("authorization")
+    if header is not None:
+        if not header.lower().startswith("bearer ") or header[7:].strip() == "":
+            raise HTTPException(status_code=401, detail="Authorization Bearer token is required")
+        device = hub.device_for_token(header[7:].strip())
+        return device["github_login"], True
+    return hub.session_login(request), False
+
+
+def _github_token(hub: Hub, login: str) -> str:
+    token = hub.github_tokens.get(login, "")
+    if not token:
+        token = hub.store.get_oauth_token(login)
+        if token:
+            hub.github_tokens[login] = token
+    if not token:
+        raise HTTPException(
+            status_code=409,
+            detail="sign in on the website once so the hub holds your GitHub token",
+        )
+    return token
+
+
+def _optional_github_token(hub: Hub, login: str) -> str:
+    token = hub.github_tokens.get(login, "") or hub.store.get_oauth_token(login)
+    if token:
+        hub.github_tokens[login] = token
+    return token
+
+
+def _bounded_body_string(body: dict[str, Any], key: str, minimum: int, maximum: int) -> str:
+    value = body.get(key)
+    if not isinstance(value, str) or len(value) < minimum or len(value) > maximum:
+        raise HTTPException(status_code=400, detail=f"{key} must be a string of length {minimum}..{maximum}")
+    return value
+
+
+def _bounded_github_error(exc: Exception) -> str:
+    text = str(exc).replace("\r", " ").replace("\n", " ")
+    return text[:600] or "GitHub request failed"
+
+
+def _issue_assignees(issue_row: dict[str, Any]) -> set[str]:
+    raw = issue_row.get("assignees")
+    if not isinstance(raw, list):
+        return set()
+    out: set[str] = set()
+    for item in raw:
+        if isinstance(item, dict) and isinstance(item.get("login"), str):
+            out.add(item["login"].strip().lower())
+        elif isinstance(item, str):
+            out.add(item.strip().lower())
+    return {login for login in out if login}
+
+
+def _assignment_enrichment(
+    hub: Hub, viewer: str, token: str, repo: str, number: int
+) -> dict[str, Any]:
+    if not token:
+        return {}
+    key = (viewer, repo, number)
+    cached = hub.issue_cache.get(key)
+    if cached is not None and cached[0] > time.monotonic():
+        return dict(cached[1])
+    try:
+        issue_row = hub.github.issue(token, repo, number)
+        raw_comments = hub.github.issue_comments(token, repo, number)
+    except GitHubError:
+        return {}
+    comments: list[dict[str, Any]] = []
+    for raw in raw_comments:
+        if not isinstance(raw, dict):
+            continue
+        user = raw.get("user") if isinstance(raw.get("user"), dict) else {}
+        author = user.get("login") if isinstance(user, dict) else ""
+        body = raw.get("body") if isinstance(raw.get("body"), str) else ""
+        created_at = raw.get("created_at") if isinstance(raw.get("created_at"), str) else ""
+        comments.append(
+            {
+                "author": author if isinstance(author, str) else "",
+                "created_at": created_at,
+                "body": body[:4000],
+            }
+        )
+    comments.sort(key=lambda row: row["created_at"], reverse=True)
+    result = {
+        "state": issue_row.get("state") if isinstance(issue_row.get("state"), str) else "",
+        "assignees": sorted(_issue_assignees(issue_row)),
+        "comments": comments[:20],
+    }
+    hub.issue_cache[key] = (time.monotonic() + ISSUE_CACHE_SECONDS, result)
+    return dict(result)
+
+
+def _activity_inner(payload: dict[str, Any]) -> dict[str, Any]:
+    inner = payload.get("payload")
+    return inner if isinstance(inner, dict) else {}
+
+
+def _int_usage(value: Any) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _row_time(payload: dict[str, Any], fallback: str) -> str:
+    for key in ("created_at", "started_at", "ran_at", "recorded_at"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            return value
+    inner = _activity_inner(payload)
+    for key in ("created_at", "started_at", "ran_at", "recorded_at"):
+        value = inner.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return fallback
+
+
+def _usage_response(hub: Hub, login: str) -> dict[str, Any]:
+    allowed = hub.visible(login)
+    rows = hub.store.query(
+        "SELECT * FROM row_replica WHERE table_name = 'activity' "
+        "AND github_login IN ({}) ORDER BY updated_at DESC, row_id DESC".format(_placeholders(allowed)),
+        tuple(sorted(allowed)),
+    )
+    lane_groups: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    account_latest: dict[tuple[str, str, str], dict[str, Any]] = {}
+    grok: list[dict[str, Any]] = []
+    for row in rows:
+        payload = loads(row["payload"])
+        if not isinstance(payload, dict):
+            continue
+        inner = _activity_inner(payload)
+        activity_type = payload.get("type")
+        if activity_type == "lane.run":
+            provider = inner.get("vendor") or inner.get("provider") or payload.get("vendor") or payload.get("provider") or ""
+            model = inner.get("model") or payload.get("model") or ""
+            session_id = payload.get("session_id") or inner.get("session_id") or ""
+            if not all(isinstance(value, str) for value in (provider, model, session_id)):
+                continue
+            usage = inner.get("usage") if isinstance(inner.get("usage"), dict) else payload.get("usage")
+            if not isinstance(usage, dict):
+                usage = {}
+            key = (row["github_login"], session_id, provider, model)
+            item = lane_groups.get(key)
+            at = _row_time(payload, row["updated_at"])
+            if item is None:
+                item = {
+                    "login": row["github_login"],
+                    "session_id": session_id,
+                    "provider": provider,
+                    "model": model,
+                    "runs": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                    "last_at": at,
+                }
+                lane_groups[key] = item
+            item["runs"] += 1
+            for field in (
+                "input_tokens",
+                "output_tokens",
+                "cache_read_input_tokens",
+                "cache_creation_input_tokens",
+            ):
+                item[field] += _int_usage(usage.get(field))
+            if at > item["last_at"]:
+                item["last_at"] = at
+        if activity_type != "usage.snapshot":
+            continue
+        vendor = inner.get("vendor") or inner.get("provider") or ""
+        if vendor == "grok":
+            grok.append(_payload_with_origin(row))
+        if vendor != "openrouter":
+            continue
+        account = inner.get("account") or inner.get("account_email") or ""
+        if not isinstance(account, str):
+            account = ""
+        account_key = (row["github_login"], vendor, account)
+        candidate = {
+            "login": row["github_login"],
+            "vendor": vendor,
+            "account": account,
+            "usage_usd": inner.get("usage_usd"),
+            "usage_daily_usd": inner.get("usage_daily_usd"),
+            "usage_weekly_usd": inner.get("usage_weekly_usd"),
+            "usage_monthly_usd": inner.get("usage_monthly_usd"),
+            "limit_usd": inner.get("limit_usd"),
+            "limit_remaining_usd": inner.get("limit_remaining_usd"),
+            "fetched_at": inner.get("fetched_at"),
+        }
+        current = account_latest.get(account_key)
+        if current is None or str(candidate.get("fetched_at") or "") > str(current.get("fetched_at") or ""):
+            account_latest[account_key] = candidate
+    lanes = sorted(lane_groups.values(), key=lambda row: (row["last_at"], row["login"]), reverse=True)
+    accounts = list(account_latest.values())
+    accounts.sort(key=lambda row: str(row.get("fetched_at") or ""), reverse=True)
+    return {"lanes": lanes, "accounts": accounts, "grok": grok}
+
+
+def _payload_relation(payload: dict[str, Any], key: str) -> str:
+    value = payload.get(key)
+    if isinstance(value, str):
+        return value
+    inner = _activity_inner(payload)
+    value = inner.get(key)
+    return value if isinstance(value, str) else ""
+
+
+def _timeline_item(row: Any, payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "table": row["table_name"],
+        "row_id": row["row_id"],
+        "at": _row_time(payload, row["updated_at"]),
+        "payload": payload,
+    }
+
+
+def _session_timeline(hub: Hub, session_row: Any, allowed: set[str]) -> list[dict[str, Any]]:
+    session_id = session_row["row_id"]
+    session_payload = loads(session_row["payload"])
+    if not isinstance(session_payload, dict):
+        session_payload = {}
+    selected: list[tuple[Any, dict[str, Any]]] = [(session_row, session_payload)]
+    task_ids: set[str] = set()
+    rows = hub.store.query(
+        "SELECT * FROM row_replica WHERE github_login IN ({}) AND table_name IN "
+        "('activity','task','task_round','agent','checklist_item','local_check','review_gate')".format(
+            _placeholders(allowed)
+        ),
+        tuple(sorted(allowed)),
+    )
+    for row in rows:
+        if row["table_name"] != "task":
+            continue
+        payload = loads(row["payload"])
+        if not isinstance(payload, dict) or _payload_relation(payload, "session_id") != session_id:
+            continue
+        selected.append((row, payload))
+        task_ids.add(row["row_id"])
+        payload_id = payload.get("id")
+        if isinstance(payload_id, str):
+            task_ids.add(payload_id)
+    for row in rows:
+        if row["table_name"] != "activity":
+            continue
+        payload = loads(row["payload"])
+        if not isinstance(payload, dict):
+            continue
+        if _payload_relation(payload, "session_id") == session_id or _payload_relation(payload, "task_id") in task_ids:
+            selected.append((row, payload))
+    for row in rows:
+        if row["table_name"] in ("activity", "task"):
+            continue
+        payload = loads(row["payload"])
+        if not isinstance(payload, dict):
+            continue
+        if _payload_relation(payload, "session_id") == session_id or _payload_relation(payload, "task_id") in task_ids:
+            selected.append((row, payload))
+    timeline = [_timeline_item(row, payload) for row, payload in selected]
+    timeline.sort(key=lambda item: (item["at"], item["table"], item["row_id"]))
+    return timeline
 
 
 def _any_login(hub: Hub, request: Request) -> str:
