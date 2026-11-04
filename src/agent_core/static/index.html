@@ -121,6 +121,8 @@
     .agent-card textarea { width: min(100%, 760px); min-height: 100px; box-sizing: border-box; }
     .assignment { border-top: 1px solid var(--table-rule); margin-top: 12px; padding-top: 12px; }
     .comments { margin: 8px 0; padding-left: 20px; }
+    .assignment-failure { background: var(--surface); border: 2px solid var(--bad); border-radius: 6px; padding: 12px; font-weight: 700; }
+    .assignment-failure a { color: var(--bad); }
   </style>
 </head>
 <body>
@@ -479,6 +481,7 @@
             <label>Repository <input name="repo" required placeholder="Owner/Name"></label>
             <label>Title <input name="title" required maxlength="256"></label>
             <label>Body <textarea name="body" required maxlength="60000"></textarea></label><button type="submit">Assign</button>
+            <p class="assignment-failure" hidden></p>
           </form><h4>Assignments</h4>${assignments}</div>`;
       }).join("");
     }
@@ -753,7 +756,35 @@
         const fd = new FormData(form);
         const payload = { agent: form.dataset.agent, repo: fd.get("repo"), title: fd.get("title"), body: fd.get("body") };
         const res = await fetch("/api/assignments", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
-        if (!res.ok) { document.getElementById("err").hidden = false; document.getElementById("err").textContent = (await res.json()).detail || "assignment failed"; return; }
+        if (!res.ok) {
+          let failure = {};
+          try { failure = await res.json(); } catch (e) {}
+          if (typeof failure.url === "string" && failure.url) {
+            const result = form.querySelector(".assignment-failure");
+            const submit = form.querySelector('button[type="submit"]');
+            const link = document.createElement("a");
+            link.href = failure.url;
+            link.target = "_blank";
+            link.rel = "noopener";
+            link.textContent = "Issue was created but the agent assignment failed — open it instead of submitting again";
+            result.replaceChildren(link);
+            result.hidden = false;
+            submit.disabled = true;
+            const unlock = () => {
+              submit.disabled = false;
+              result.hidden = true;
+              result.replaceChildren();
+              form.removeEventListener("input", unlock);
+              form.removeEventListener("change", unlock);
+            };
+            form.addEventListener("input", unlock);
+            form.addEventListener("change", unlock);
+          } else {
+            document.getElementById("err").hidden = false;
+            document.getElementById("err").textContent = failure.detail || "assignment failed";
+          }
+          return;
+        }
         form.reset(); render(); return;
       }
       if (form.classList.contains("reply-form")) {

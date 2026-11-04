@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlencode, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
 
@@ -187,18 +187,41 @@ class RealGitHub(GitHub):
         params: dict[str, Any] | None = None,
         expected: tuple[int, ...] = (200,),
     ) -> Any:
-        resp = httpx.request(
+        result, _headers = self._request_json_with_headers(
             method,
-            f"{GITHUB_API_URL}{path}",
-            json=json_body,
+            path,
+            token,
+            json_body=json_body,
             params=params,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
-            timeout=20.0,
+            expected=expected,
         )
+        return result
+
+    def _request_json_with_headers(
+        self,
+        method: str,
+        path: str,
+        token: str,
+        *,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+        expected: tuple[int, ...] = (200,),
+    ) -> tuple[Any, dict[str, str]]:
+        try:
+            resp = httpx.request(
+                method,
+                f"{GITHUB_API_URL}{path}",
+                json=json_body,
+                params=params,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/vnd.github+json",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                },
+                timeout=20.0,
+            )
+        except httpx.HTTPError as exc:
+            raise GitHubError(f"GitHub request failed: {type(exc).__name__}") from exc
         if resp.status_code not in expected:
             message = ""
             try:
@@ -209,9 +232,12 @@ class RealGitHub(GitHub):
                 pass
             raise GitHubError(f"GitHub request failed: HTTP {resp.status_code}{message}")
         try:
-            return resp.json()
+            result = resp.json()
         except Exception as exc:
             raise GitHubError(f"GitHub request failed: HTTP {resp.status_code} returned invalid JSON") from exc
+        raw_headers = getattr(resp, "headers", {})
+        headers = {str(key).lower(): str(value) for key, value in raw_headers.items()}
+        return result, headers
 
     def create_issue(
         self, token: str, repo: str, title: str, body: str, assignees: list[str]
@@ -239,6 +265,7 @@ class RealGitHub(GitHub):
             f"/repos/{repo}/issues/{number}/assignees",
             token,
             json_body={"assignees": assignees},
+            expected=(200, 201),
         )
         if not isinstance(result, dict):
             raise GitHubError("GitHub assignee update returned an invalid response")
@@ -263,10 +290,51 @@ class RealGitHub(GitHub):
         return [item for item in result if isinstance(item, dict)] if isinstance(result, list) else []
 
     def issue_comments(self, token: str, repo: str, number: int) -> list[dict[str, Any]]:
-        result = self._request_json(
-            "GET", f"/repos/{repo}/issues/{number}/comments", token, params={"per_page": 100}
+        path = f"/repos/{repo}/issues/{number}/comments"
+        first, headers = self._request_json_with_headers(
+            "GET", path, token, params={"per_page": 100}
         )
-        return [item for item in result if isinstance(item, dict)] if isinstance(result, list) else []
+        first_items = [item for item in first if isinstance(item, dict)] if isinstance(first, list) else []
+        last_page = _link_page(headers.get("link", ""), "last")
+        if last_page is None or last_page <= 1:
+            return first_items
+
+        last, last_headers = self._request_json_with_headers(
+            "GET", path, token, params={"per_page": 100, "page": last_page}
+        )
+        last_items = [item for item in last if isinstance(item, dict)] if isinstance(last, list) else []
+        if len(last_items) >= 20:
+            return last_items
+
+        previous_page = _link_page(last_headers.get("link", ""), "prev")
+        if previous_page is None:
+            previous_page = last_page - 1
+        if previous_page < 1:
+            return last_items
+        previous = self._request_json(
+            "GET", path, token, params={"per_page": 100, "page": previous_page}
+        )
+        previous_items = (
+            [item for item in previous if isinstance(item, dict)] if isinstance(previous, list) else []
+        )
+        return previous_items + last_items
+
+
+def _link_page(link_header: str, relation: str) -> int | None:
+    for raw_link in link_header.split(","):
+        parts = [part.strip() for part in raw_link.split(";")]
+        if not parts or not (parts[0].startswith("<") and parts[0].endswith(">")):
+            continue
+        relations: set[str] = set()
+        for parameter in parts[1:]:
+            if parameter.startswith("rel="):
+                relations.update(parameter[4:].strip('"').split())
+        if relation not in relations:
+            continue
+        pages = parse_qs(urlparse(parts[0][1:-1]).query).get("page", [])
+        if pages and pages[-1].isdigit() and int(pages[-1]) > 0:
+            return int(pages[-1])
+    return None
 
 
 class FakeGitHub(GitHub):
@@ -385,4 +453,10 @@ class FakeGitHub(GitHub):
         self.issue_calls.append(
             {"operation": "issue_comments", "token": token, "repo": repo, "number": number}
         )
-        return [dict(comment) for comment in self.comments.get((repo, number), [])]
+        comments = self.comments.get((repo, number), [])
+        if not comments:
+            return []
+        last_page_start = ((len(comments) - 1) // 100) * 100
+        if len(comments) - last_page_start < 20 and last_page_start > 0:
+            last_page_start = max(0, last_page_start - 100)
+        return [dict(comment) for comment in comments[last_page_start:]]

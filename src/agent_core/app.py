@@ -474,32 +474,48 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         trailer = f"Assigned through {cfg.public_url} by @{actor}."
         posted_body = issue_body.rstrip() + "\n\n" + trailer
         url = ""
+        number: int | None = None
+        issue_created = False
         try:
-            created = hub.github.create_issue(token, repo, title, posted_body, [agent])
-            number = created.get("number")
+            created = await asyncio.to_thread(
+                hub.github.create_issue, token, repo, title, posted_body, [agent]
+            )
+            issue_created = True
+            created_number = created.get("number")
             created_url = created.get("html_url")
-            if isinstance(number, bool) or not isinstance(number, int) or not isinstance(created_url, str) or not created_url:
+            if isinstance(created_number, int) and not isinstance(created_number, bool):
+                number = created_number
+            if isinstance(created_url, str):
+                url = created_url
+            if number is None or not url:
                 raise GitHubError("GitHub issue creation returned no issue number or URL")
-            url = created_url
-            current = hub.github.issue(token, repo, number)
+            current = await asyncio.to_thread(hub.github.issue, token, repo, number)
             if agent not in _issue_assignees(current):
-                hub.github.add_assignees(token, repo, number, [agent])
-                current = hub.github.issue(token, repo, number)
+                await asyncio.to_thread(hub.github.add_assignees, token, repo, number, [agent])
+                current = await asyncio.to_thread(hub.github.issue, token, repo, number)
             if agent not in _issue_assignees(current):
                 return JSONResponse(
                     {
                         "detail": "GitHub did not retain the requested assignee after one retry",
                         "url": url,
+                        "number": number,
                     },
                     status_code=502,
                 )
         except GitHubError as exc:
-            if url:
+            if issue_created:
+                failure: dict[str, Any] = {"detail": _bounded_github_error(exc)}
+                if url:
+                    failure["url"] = url
+                if number is not None:
+                    failure["number"] = number
                 return JSONResponse(
-                    {"detail": _bounded_github_error(exc), "url": url},
+                    failure,
                     status_code=502,
                 )
             raise HTTPException(status_code=502, detail=_bounded_github_error(exc)) from exc
+        if number is None:
+            raise HTTPException(status_code=502, detail="GitHub issue creation returned no issue number")
         activity_id = str(uuid.uuid4())
         event_payload = {
             "id": activity_id,
@@ -562,7 +578,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         comment_body = _bounded_body_string(body, "body", 1, 60000)
         token = _github_token(hub, actor)
         try:
-            issue_row = hub.github.issue(token, repo, number)
+            issue_row = await asyncio.to_thread(hub.github.issue, token, repo, number)
             assigned_agents = {
                 agent
                 for agent in _issue_assignees(issue_row)
@@ -570,7 +586,9 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
             }
             if not assigned_agents:
                 raise HTTPException(status_code=403, detail="not an owner of an agent assigned to this issue")
-            comment = hub.github.create_issue_comment(token, repo, number, comment_body)
+            comment = await asyncio.to_thread(
+                hub.github.create_issue_comment, token, repo, number, comment_body
+            )
         except HTTPException:
             raise
         except GitHubError as exc:
