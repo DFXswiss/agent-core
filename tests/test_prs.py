@@ -302,6 +302,9 @@ def test_index_agent_render_preserves_forms_and_handles_fetch_lifecycle() -> Non
     submit_handler = html.split('document.addEventListener("submit"', 1)[1].split(
         'document.addEventListener("click"', 1
     )[0]
+    assign_handler = submit_handler.split('form.classList.contains("assign-form")', 1)[
+        1
+    ].split('form.classList.contains("reply-form")', 1)[0]
     reply_handler = submit_handler.split('form.classList.contains("reply-form")', 1)[1]
     abort_fn = html.split("function abortHubFetches()", 1)[1].split(
         "function clearHubTables()", 1
@@ -323,6 +326,14 @@ def test_index_agent_render_preserves_forms_and_handles_fetch_lifecycle() -> Non
     assert submit_handler.count("setFormBusy(form, false)") >= 2
     assert submit_handler.count("finally") >= 2
     assert submit_handler.count("await repaintAgents()") == 2
+    for handler in (assign_handler, reply_handler):
+        assert "const generation = agentRenderGen" in handler
+        assert "const login = window.__login" in handler
+        before_repaint = handler.split("if (succeeded)", 1)[1].split(
+            "await repaintAgents()", 1
+        )[0]
+        assert "generation !== agentRenderGen" in before_repaint
+        assert "login !== window.__login" in before_repaint
     assert "const failure = await responseJson(res)" in reply_handler
 
 
