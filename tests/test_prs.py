@@ -321,18 +321,27 @@ def test_index_agent_render_preserves_forms_and_handles_fetch_lifecycle() -> Non
     assert "signal: ctl.signal" in render_agents
     assert "assignmentControllers.forEach(ctl => ctl.abort())" in abort_fn
     assert "++agentRenderGen" in clear_fn
+    assert "++agentSessionEpoch" in clear_fn
+    assert html.count("++agentSessionEpoch") == 1
     assert "form.inert = busy" in html
     assert submit_handler.count("setFormBusy(form, true)") == 2
     assert submit_handler.count("setFormBusy(form, false)") >= 2
     assert submit_handler.count("finally") >= 2
     assert submit_handler.count("await repaintAgents()") == 2
     for handler in (assign_handler, reply_handler):
-        assert "const generation = agentRenderGen" in handler
+        assert "const sessionEpoch = agentSessionEpoch" in handler
+        assert "const generation = agentRenderGen" not in handler
         assert "const login = window.__login" in handler
+        before_success = handler.split("succeeded = true", 1)[0].rsplit("}", 1)[1]
+        assert "sessionEpoch !== agentSessionEpoch" in before_success
+        assert "login !== window.__login" in before_success
+        finally_block = handler.split("finally", 1)[1].split("if (succeeded)", 1)[0]
+        assert "sessionEpoch === agentSessionEpoch" in finally_block
+        assert "login === window.__login" in finally_block
         before_repaint = handler.split("if (succeeded)", 1)[1].split(
             "await repaintAgents()", 1
         )[0]
-        assert "generation !== agentRenderGen" in before_repaint
+        assert "sessionEpoch !== agentSessionEpoch" in before_repaint
         assert "login !== window.__login" in before_repaint
     assert "const failure = await responseJson(res)" in reply_handler
 

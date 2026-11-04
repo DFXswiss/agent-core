@@ -278,7 +278,7 @@ Cookie session after GitHub OAuth.
 {"agent":"agent-login","repo":"Owner/Name","title":"Work title","body":"Work details"}
 ```
 
-The actor must own the agent. A bearer belonging to an agent is refused. Repository names use `Owner/Name`; titles are 1..256 characters and bodies are 1..60000. A missing stored OAuth token returns 409 with a request to sign in on the website. The hub creates one issue with the agent in `assignees`, verifies the resulting issue, retries the assignee endpoint once if needed, and returns the issue URL on a final 502 so callers do not recreate it blindly. The issue body ends with `Assigned through <public URL> by @<actor>.` Success is 201:
+The actor must own the agent. A bearer belonging to an agent is refused. Repository names use `Owner/Name`; titles are 1..256 characters and bodies are 1..60000. A missing stored OAuth token returns 409 with a request to sign in on the website. The hub creates one issue with the agent in `assignees`, verifies the resulting issue, retries the assignee endpoint once if needed, and returns the issue URL on a final 502 so callers do not recreate it blindly. The issue body ends with `Assigned through <public URL> by @<actor>.` The response and stored `assignment.created` payload use GitHub's canonical repository case, even when the request used different casing. Success is 201:
 
 ```json
 {"repo":"Owner/Name","number":42,"url":"https://github.com/Owner/Name/issues/42","agent":"agent-login","actor":"owner-login"}

@@ -492,6 +492,14 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                 url = created_url
             if number is None or not url:
                 raise GitHubError("GitHub issue creation returned no issue number or URL")
+            canonical_repo = _issue_repository_name(created)
+            if canonical_repo is None:
+                repository = await asyncio.to_thread(hub.github.repository, token, repo)
+                full_name = repository.get("full_name")
+                if not isinstance(full_name, str) or REPO_RE.fullmatch(full_name) is None:
+                    raise GitHubError("GitHub repository lookup returned no canonical full_name")
+                canonical_repo = full_name
+            repo = canonical_repo
             current = await asyncio.to_thread(hub.github.issue, token, repo, number)
             if agent not in _issue_assignees(current):
                 await asyncio.to_thread(hub.github.add_assignees, token, repo, number, [agent])
@@ -1066,6 +1074,17 @@ def _bounded_body_string(body: dict[str, Any], key: str, minimum: int, maximum: 
 def _bounded_github_error(exc: Exception) -> str:
     text = str(exc).replace("\r", " ").replace("\n", " ")
     return text[:600] or "GitHub request failed"
+
+
+def _issue_repository_name(issue_row: dict[str, Any]) -> str | None:
+    repository_url = issue_row.get("repository_url")
+    if not isinstance(repository_url, str):
+        return None
+    match = re.search(r"/repos/([^/]+)/([^/]+)/?$", repository_url)
+    if match is None:
+        return None
+    repo = f"{match.group(1)}/{match.group(2)}"
+    return repo if REPO_RE.fullmatch(repo) is not None else None
 
 
 def _issue_assignees(issue_row: dict[str, Any]) -> set[str]:

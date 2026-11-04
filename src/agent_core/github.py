@@ -39,6 +39,9 @@ class GitHub:
     ) -> dict[str, Any]:
         raise NotImplementedError
 
+    def repository(self, token: str, repo: str) -> dict[str, Any]:
+        raise NotImplementedError
+
     def issue(self, token: str, repo: str, number: int) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -253,6 +256,12 @@ class RealGitHub(GitHub):
             raise GitHubError("GitHub issue creation returned an invalid response")
         return result
 
+    def repository(self, token: str, repo: str) -> dict[str, Any]:
+        result = self._request_json("GET", f"/repos/{repo}", token)
+        if not isinstance(result, dict):
+            raise GitHubError("GitHub repository lookup returned an invalid response")
+        return result
+
     def issue(self, token: str, repo: str, number: int) -> dict[str, Any]:
         result = self._request_json("GET", f"/repos/{repo}/issues/{number}", token)
         if not isinstance(result, dict):
@@ -351,6 +360,7 @@ class FakeGitHub(GitHub):
         self.issue_calls: list[dict[str, Any]] = []
         self.omit_assignees_on_create = False
         self.omit_assignees_after_add = False
+        self.canonical_repos: dict[str, str] = {}
 
     def authorize_url(self, state: str, redirect_uri: str) -> str:
         return f"https://github.test/login/oauth/authorize?state={state}&redirect_uri={redirect_uri}"
@@ -377,17 +387,21 @@ class FakeGitHub(GitHub):
     def create_issue(
         self, token: str, repo: str, title: str, body: str, assignees: list[str]
     ) -> dict[str, Any]:
-        number = 1 + max((n for r, n in self.issues if r == repo), default=0)
+        canonical_repo = self.canonical_repos.get(repo.lower(), repo)
+        number = 1 + max(
+            (n for r, n in self.issues if r.lower() == canonical_repo.lower()), default=0
+        )
         assigned = [] if self.omit_assignees_on_create else [{"login": a} for a in assignees]
         issue = {
             "number": number,
-            "html_url": f"https://github.test/{repo}/issues/{number}",
+            "html_url": f"https://github.test/{canonical_repo}/issues/{number}",
+            "repository_url": f"https://api.github.test/repos/{canonical_repo}",
             "state": "open",
             "title": title,
             "body": body,
             "assignees": assigned,
         }
-        self.issues[(repo, number)] = issue
+        self.issues[(canonical_repo, number)] = issue
         self.issue_calls.append(
             {
                 "operation": "create_issue",
@@ -399,6 +413,11 @@ class FakeGitHub(GitHub):
             }
         )
         return dict(issue)
+
+    def repository(self, token: str, repo: str) -> dict[str, Any]:
+        canonical_repo = self.canonical_repos.get(repo.lower(), repo)
+        self.issue_calls.append({"operation": "repository", "token": token, "repo": repo})
+        return {"full_name": canonical_repo}
 
     def issue(self, token: str, repo: str, number: int) -> dict[str, Any]:
         self.issue_calls.append({"operation": "issue", "token": token, "repo": repo, "number": number})

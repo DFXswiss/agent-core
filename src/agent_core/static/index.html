@@ -275,6 +275,7 @@
     let usageInflight = null;
     let usageGen = 0;
     let agentRenderGen = 0;
+    let agentSessionEpoch = 0;
     let latestAgentState = {};
     const assignmentControllers = new Set();
     const agentFormsInFlight = new Set();
@@ -300,6 +301,7 @@
 
     function clearHubTables() {
       ++agentRenderGen;
+      ++agentSessionEpoch;
       latestAgentState = {};
       window.__ownedAgents = [];
       partialAssignmentLocks.clear();
@@ -854,7 +856,7 @@
         ev.preventDefault();
         const formKey = agentFormKey(form);
         if (agentFormsInFlight.has(formKey)) return;
-        const generation = agentRenderGen;
+        const sessionEpoch = agentSessionEpoch;
         const login = window.__login;
         const fd = new FormData(form);
         const payload = { agent: form.dataset.agent, repo: fd.get("repo"), title: fd.get("title"), body: fd.get("body") };
@@ -865,7 +867,7 @@
           const res = await fetch("/api/assignments", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
           if (!res.ok) {
             const failure = await responseJson(res);
-            if (generation !== agentRenderGen || login !== window.__login) return;
+            if (sessionEpoch !== agentSessionEpoch || login !== window.__login) return;
             if (typeof failure.url === "string" && failure.url) {
               partialAssignmentLocks.set(formKey, failure.url);
               applyPartialAssignmentLock(form, formKey, failure.url);
@@ -875,16 +877,16 @@
             }
             return;
           }
-          if (generation !== agentRenderGen || login !== window.__login) return;
+          if (sessionEpoch !== agentSessionEpoch || login !== window.__login) return;
           form.reset();
           succeeded = true;
         } catch (e) {
-          if (generation !== agentRenderGen || login !== window.__login) return;
+          if (sessionEpoch !== agentSessionEpoch || login !== window.__login) return;
           document.getElementById("err").hidden = false;
           document.getElementById("err").textContent = String(e);
         } finally {
           agentFormsInFlight.delete(formKey);
-          if (generation === agentRenderGen && login === window.__login) {
+          if (sessionEpoch === agentSessionEpoch && login === window.__login) {
             setFormBusy(form, false);
             document.querySelectorAll("#agents-list .assign-form").forEach(current => {
               if (agentFormKey(current) === formKey) setFormBusy(current, false);
@@ -901,7 +903,7 @@
           }
         }
         if (succeeded) {
-          if (generation !== agentRenderGen || login !== window.__login) return;
+          if (sessionEpoch !== agentSessionEpoch || login !== window.__login) return;
           partialAssignmentLocks.delete(formKey);
           document.querySelectorAll("#agents-list .assign-form").forEach(current => {
             if (agentFormKey(current) === formKey) current.reset();
@@ -914,7 +916,7 @@
         ev.preventDefault();
         const formKey = agentFormKey(form);
         if (agentFormsInFlight.has(formKey)) return;
-        const generation = agentRenderGen;
+        const sessionEpoch = agentSessionEpoch;
         const login = window.__login;
         const fd = new FormData(form);
         const parts = (form.dataset.repo || "").split("/");
@@ -926,21 +928,21 @@
           const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ body: fd.get("body") }) });
           if (!res.ok) {
             const failure = await responseJson(res);
-            if (generation !== agentRenderGen || login !== window.__login) return;
+            if (sessionEpoch !== agentSessionEpoch || login !== window.__login) return;
             document.getElementById("err").hidden = false;
             document.getElementById("err").textContent = failure.detail || "reply failed";
             return;
           }
-          if (generation !== agentRenderGen || login !== window.__login) return;
+          if (sessionEpoch !== agentSessionEpoch || login !== window.__login) return;
           form.reset();
           succeeded = true;
         } catch (e) {
-          if (generation !== agentRenderGen || login !== window.__login) return;
+          if (sessionEpoch !== agentSessionEpoch || login !== window.__login) return;
           document.getElementById("err").hidden = false;
           document.getElementById("err").textContent = String(e);
         } finally {
           agentFormsInFlight.delete(formKey);
-          if (generation === agentRenderGen && login === window.__login) {
+          if (sessionEpoch === agentSessionEpoch && login === window.__login) {
             setFormBusy(form, false);
             document.querySelectorAll("#agents-list .reply-form").forEach(current => {
               if (agentFormKey(current) === formKey) setFormBusy(current, false);
@@ -948,7 +950,7 @@
           }
         }
         if (succeeded) {
-          if (generation !== agentRenderGen || login !== window.__login) return;
+          if (sessionEpoch !== agentSessionEpoch || login !== window.__login) return;
           document.querySelectorAll("#agents-list .reply-form").forEach(current => {
             if (agentFormKey(current) === formKey) current.reset();
           });

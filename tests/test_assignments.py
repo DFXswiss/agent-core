@@ -57,6 +57,23 @@ def test_owner_creates_assignment_and_web_activity(agent_hub: TestClient) -> Non
     assert replica["origin_device_id"] == "web:alice"
 
 
+def test_assignment_stores_github_canonical_repo_case(agent_hub: TestClient) -> None:
+    sign_in(agent_hub, "code-alice")
+    github: FakeGitHub = agent_hub.app.state.hub.github
+    github.canonical_repos["acme/widget"] = "Acme/Widget"
+    assignment = dict(ASSIGNMENT, repo="acme/widget")
+
+    response = agent_hub.post("/api/assignments", json=assignment)
+
+    assert response.status_code == 201, response.text
+    assert response.json()["repo"] == "Acme/Widget"
+    created = next(call for call in github.issue_calls if call["operation"] == "create_issue")
+    assert created["repo"] == "acme/widget"
+    state = agent_hub.get("/api/state").json()
+    activity = next(row for row in state["activity"] if row.get("type") == "assignment.created")
+    assert activity["payload"]["repo"] == "Acme/Widget"
+
+
 def test_assignment_authorization_and_missing_token(agent_hub: TestClient) -> None:
     sign_in(agent_hub, "code-bob")
     assert agent_hub.post("/api/assignments", json=ASSIGNMENT).status_code == 403
@@ -115,6 +132,7 @@ def test_assignment_accepts_201_add_and_verify_get_decides(
                 {
                     "number": 1,
                     "html_url": "https://github.test/Acme/Widget/issues/1",
+                    "repository_url": "https://api.github.test/repos/Acme/Widget",
                     "assignees": [],
                 },
             ),
@@ -164,6 +182,7 @@ def test_assignment_transport_errors_are_bounded_and_preserve_created_issue(
                 {
                     "number": 2,
                     "html_url": "https://github.test/Acme/Widget/issues/2",
+                    "repository_url": "https://api.github.test/repos/Acme/Widget",
                     "assignees": [{"login": "helperbot"}],
                 },
             )
