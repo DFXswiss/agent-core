@@ -128,7 +128,7 @@ def test_timeline_order_relations_and_visibility(agent_hub: TestClient) -> None:
         row_id="timeline-task",
         updated_at="2026-11-04T10:02:00Z",
         login="helperbot",
-        payload={"id": "timeline-task", "session_id": "timeline-session", "started_at": "2026-11-04T10:02:00Z", "state": "working"},
+        payload={"id": "", "session_id": "timeline-session", "started_at": "2026-11-04T10:02:00Z", "state": "working"},
     )
     _insert_replica(
         agent_hub,
@@ -137,6 +137,22 @@ def test_timeline_order_relations_and_visibility(agent_hub: TestClient) -> None:
         updated_at="2026-11-04T10:03:00Z",
         login="helperbot",
         payload={"id": "timeline-check", "task_id": "timeline-task", "ran_at": "2026-11-04T10:03:00Z", "result": "passed"},
+    )
+    _insert_replica(
+        agent_hub,
+        table="activity",
+        row_id="empty-task-relation",
+        updated_at="2026-11-04T10:04:00Z",
+        login="helperbot",
+        payload={"id": "empty-task-relation", "task_id": "", "created_at": "2026-11-04T10:04:00Z"},
+    )
+    _insert_replica(
+        agent_hub,
+        table="local_check",
+        row_id="non-string-task-relation",
+        updated_at="2026-11-04T10:05:00Z",
+        login="helperbot",
+        payload={"id": "non-string-task-relation", "task_id": 7, "ran_at": "2026-11-04T10:05:00Z"},
     )
     response = agent_hub.get("/api/sessions/timeline-session/timeline")
     assert response.status_code == 200
@@ -183,3 +199,5 @@ def test_timeline_truncates_at_5000(agent_hub: TestClient) -> None:
     body = agent_hub.get("/api/sessions/long-session/timeline").json()
     assert body["truncated"] is True
     assert len(body["timeline"]) == 5000
+    assert body["timeline"][0]["row_id"] == "long-activity-0001"
+    assert body["timeline"][-1]["row_id"] == "long-activity-5000"

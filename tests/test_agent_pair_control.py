@@ -7,7 +7,7 @@ from tests.test_control import _recv_until, _wait_control_connected, session_eve
 
 
 def _pair_as(client: TestClient, code: str, device_id: str, agent: str) -> str:
-    challenge = "challenge-" + device_id.replace("-", "")[:16]
+    challenge = "challenge-" + device_id.replace("-", "")[-16:]
     prepared = client.post(
         "/pair/prepare",
         json={"device_id": device_id, "challenge": challenge, "device_name": "agent-box"},
@@ -41,11 +41,12 @@ def test_pair_as_agent_authorization(agent_hub: TestClient) -> None:
         ("04", "code-alice", "not-an-agent", 404),
     ):
         device_id = f"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaab{suffix}"
-        challenge = "challenge-" + device_id.replace("-", "")[:16]
-        agent_hub.post(
+        challenge = "challenge-" + device_id.replace("-", "")[-16:]
+        prepared = agent_hub.post(
             "/pair/prepare",
             json={"device_id": device_id, "challenge": challenge, "device_name": "box"},
         )
+        assert prepared.status_code == 200, prepared.text
         sign_in(agent_hub, code)
         response = agent_hub.post(
             "/pair/confirm", json={"challenge": challenge, "as_login": target}
@@ -71,12 +72,17 @@ def test_owner_controls_agent_session_including_owner_device_bearer(agent_hub: T
     with agent_hub.websocket_connect(f"/sync/ws?token={agent_token}") as ws:
         ws.receive_json()
         ws.send_json({"type": "control-ready"})
-        _wait_control_connected(agent_hub, session_id)
-        controlled = agent_hub.post(
-            f"/api/sessions/{session_id}/control",
-            headers={"Authorization": f"Bearer {owner_token}"},
-            json={"action": "stop"},
+        agent_hub.app.state.hub.store.execute(
+            "UPDATE device SET github_login = ? WHERE id = ?", ("HeLpErBoT", agent_id)
         )
+        detail = _wait_control_connected(agent_hub, session_id)
+        assert detail["can_control"] is True
+        with TestClient(agent_hub.app) as bearer_client:
+            controlled = bearer_client.post(
+                f"/api/sessions/{session_id}/control",
+                headers={"Authorization": f"Bearer {owner_token}"},
+                json={"action": "stop"},
+            )
         assert controlled.status_code == 202
         assert _recv_until(ws, lambda frame: frame.get("type") == "control")["action"] == "stop"
 

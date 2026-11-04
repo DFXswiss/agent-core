@@ -292,6 +292,40 @@ def test_index_lists_pr_columns() -> None:
     assert 'id="k-usage"' in html
 
 
+def test_index_agent_render_preserves_forms_and_handles_fetch_lifecycle() -> None:
+    html = (
+        Path(__file__).resolve().parents[1] / "src" / "agent_core" / "static" / "index.html"
+    ).read_text(encoding="utf-8")
+    render_agents = html.split("async function renderAgents", 1)[1].split(
+        "function repaintAgents", 1
+    )[0]
+    submit_handler = html.split('document.addEventListener("submit"', 1)[1].split(
+        'document.addEventListener("click"', 1
+    )[0]
+    reply_handler = submit_handler.split('form.classList.contains("reply-form")', 1)[1]
+    abort_fn = html.split("function abortHubFetches()", 1)[1].split(
+        "function clearHubTables()", 1
+    )[0]
+    clear_fn = html.split("function clearHubTables()", 1)[1].split("function jsonGet", 1)[0]
+
+    assert "section.contains(document.activeElement)" not in render_agents
+    assert "captureAgentDrafts()" in render_agents
+    assert "restoreAgentFormState(drafts)" in render_agents
+    assert "Could not load assignments:" in render_agents
+    assert "try { body = await res.json(); } catch" in render_agents
+    assert "No assignments." in render_agents
+    assert "new AbortController()" in render_agents
+    assert "signal: ctl.signal" in render_agents
+    assert "assignmentControllers.forEach(ctl => ctl.abort())" in abort_fn
+    assert "++agentRenderGen" in clear_fn
+    assert "form.inert = busy" in html
+    assert submit_handler.count("setFormBusy(form, true)") == 2
+    assert submit_handler.count("setFormBusy(form, false)") >= 2
+    assert submit_handler.count("finally") >= 2
+    assert submit_handler.count("await repaintAgents()") == 2
+    assert "const failure = await responseJson(res)" in reply_handler
+
+
 def test_oauth_scope_is_read_user_repo(cfg) -> None:
     url = RealGitHub(cfg).authorize_url("st", "http://127.0.0.1/auth/github/callback")
     query = parse_qs(urlparse(url).query)

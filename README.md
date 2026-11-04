@@ -68,6 +68,8 @@ Anyone who can see a session may watch its live terminal on the website. Start, 
 
 The dashboard shows an **Agents** section to people who own at least one configured agent. It links agent sessions to their chronological timelines, shows current coordinator state, creates assignments, displays issue questions, and posts owner replies. Usage is available in lane-token, OpenRouter-account, and Grok tables.
 
+Session timelines keep the newest 5,000 related rows when capped and return those rows in chronological order (oldest first) with `truncated: true`.
+
 Website API endpoints are documented in [PROTOCOL.md](PROTOCOL.md):
 
 - `POST /api/assignments` and `GET /api/assignments?agent=<login>`

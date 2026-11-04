@@ -261,7 +261,7 @@ Cookie session after GitHub OAuth.
 - `GET /api/sessions/{id}` — one visible session plus control flags.
 - `POST /api/sessions/{id}/control` — start / stop / input / resize (device login or configured agent owner only).
 - `GET /api/sessions/{id}/terminal` — JSON ring snapshot or SSE terminal stream.
-- `GET /api/sessions/{id}/timeline` — all related replica rows, oldest first, capped at 5,000 with `truncated: true` when capped.
+- `GET /api/sessions/{id}/timeline` — the newest 5,000 related replica rows, returned oldest first, with `truncated: true` when capped.
 - `POST /api/assignments` — create and verify an agent-assigned GitHub issue using the owner's OAuth token.
 - `GET /api/assignments?agent=<login>` — newest-first assignment activity, enriched best-effort with issue state, assignees, and the newest 20 comments.
 - `POST /api/assignments/{owner}/{name}/{number}/comments` — reply using an owner OAuth token after a fresh assignee check.
@@ -298,4 +298,4 @@ Creation records an `activity` replica with type `assignment.created`; replies r
 
 ### Session timeline
 
-`GET /api/sessions/{id}/timeline` returns 404 unless the session is visible. It includes the session, its activities and tasks, and task/session-related `task_round`, `agent`, `checklist_item`, `local_check`, and `review_gate` replicas. Each row has `table`, `row_id`, `at`, and `payload`; `at` prefers `created_at`, `started_at`, `ran_at`, or `recorded_at` and otherwise uses replica `updated_at`. Unlike every dashboard list, the timeline is oldest first. `GET /sessions/{id}` renders lane runs and tool calls, coordinator task phase and blocker information, checks and gates, and assignment links.
+`GET /api/sessions/{id}/timeline` returns 404 unless the session is visible. It includes the session, its activities and tasks, and task/session-related `task_round`, `agent`, `checklist_item`, `local_check`, and `review_gate` replicas. Each row has `table`, `row_id`, `at`, and `payload`; `at` prefers `created_at`, `started_at`, `ran_at`, or `recorded_at` and otherwise uses replica `updated_at`. When more than 5,000 rows match, it keeps the newest 5,000 rows and sets `truncated` to true. Unlike every dashboard list, the returned timeline remains oldest first. `GET /sessions/{id}` renders lane runs and tool calls, coordinator task phase and blocker information, checks and gates, and assignment links.

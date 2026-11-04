@@ -155,6 +155,9 @@ def can_control(hub: Hub, login: str, origin_device_id: str) -> bool:
     if row is None:
         return False
     device_login = row["github_login"]
+    if not isinstance(device_login, str):
+        return False
+    device_login = device_login.strip().lower()
     actor = login.strip().lower()
     return device_login == actor or hub.roster.owns_agent(actor, device_login)
 
@@ -271,7 +274,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
     def pair_confirm(request: Request, body: dict[str, Any]) -> dict[str, str]:
         login = hub.session_login(request)
         challenge = _require_str(body, "challenge")
-        paired_login = login
+        paired_login = login.strip().lower()
         if body.get("as_login") is not None:
             as_login = _require_str(body, "as_login").lower()
             if not hub.roster.is_agent(as_login):
@@ -691,7 +694,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         truncated = len(rows) > TIMELINE_ROW_CAP
         return {
             "session_id": session_id,
-            "timeline": rows[:TIMELINE_ROW_CAP],
+            "timeline": rows[-TIMELINE_ROW_CAP:],
             "truncated": truncated,
         }
 
@@ -1262,9 +1265,11 @@ def _session_timeline(hub: Hub, session_row: Any, allowed: set[str]) -> list[dic
         if not isinstance(payload, dict) or _payload_relation(payload, "session_id") != session_id:
             continue
         selected.append((row, payload))
-        task_ids.add(row["row_id"])
+        row_id = row["row_id"]
+        if isinstance(row_id, str) and row_id:
+            task_ids.add(row_id)
         payload_id = payload.get("id")
-        if isinstance(payload_id, str):
+        if isinstance(payload_id, str) and payload_id:
             task_ids.add(payload_id)
     for row in rows:
         if row["table_name"] != "activity":
@@ -1272,7 +1277,8 @@ def _session_timeline(hub: Hub, session_row: Any, allowed: set[str]) -> list[dic
         payload = loads(row["payload"])
         if not isinstance(payload, dict):
             continue
-        if _payload_relation(payload, "session_id") == session_id or _payload_relation(payload, "task_id") in task_ids:
+        task_id = _payload_relation(payload, "task_id")
+        if _payload_relation(payload, "session_id") == session_id or (task_id != "" and task_id in task_ids):
             selected.append((row, payload))
     for row in rows:
         if row["table_name"] in ("activity", "task"):
@@ -1280,7 +1286,8 @@ def _session_timeline(hub: Hub, session_row: Any, allowed: set[str]) -> list[dic
         payload = loads(row["payload"])
         if not isinstance(payload, dict):
             continue
-        if _payload_relation(payload, "session_id") == session_id or _payload_relation(payload, "task_id") in task_ids:
+        task_id = _payload_relation(payload, "task_id")
+        if _payload_relation(payload, "session_id") == session_id or (task_id != "" and task_id in task_ids):
             selected.append((row, payload))
     timeline = [_timeline_item(row, payload) for row, payload in selected]
     timeline.sort(key=lambda item: (item["at"], item["table"], item["row_id"]))

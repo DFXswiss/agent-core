@@ -275,6 +275,10 @@
     let usageInflight = null;
     let usageGen = 0;
     let agentRenderGen = 0;
+    let latestAgentState = {};
+    const assignmentControllers = new Set();
+    const agentFormsInFlight = new Set();
+    const partialAssignmentLocks = new Map();
 
     async function me() {
       const res = await fetch("/auth/me");
@@ -287,12 +291,18 @@
       const s = stateInflight; stateInflight = null;
       const p = prsInflight; prsInflight = null;
       const u = usageInflight; usageInflight = null;
+      assignmentControllers.forEach(ctl => ctl.abort());
+      assignmentControllers.clear();
       if (s) s.ctl.abort();
       if (p) p.ctl.abort();
       if (u) u.ctl.abort();
     }
 
     function clearHubTables() {
+      ++agentRenderGen;
+      latestAgentState = {};
+      window.__ownedAgents = [];
+      partialAssignmentLocks.clear();
       document.getElementById("k-tasks").textContent = "–";
       document.getElementById("k-agents").textContent = "–";
       document.getElementById("k-pings").textContent = "–";
@@ -446,26 +456,109 @@
       }).join("") || "<li>No current coordinator tasks.</li>";
     }
 
+    function agentFormKey(form) {
+      if (form.classList.contains("assign-form")) return JSON.stringify(["assign", form.dataset.agent || ""]);
+      return JSON.stringify(["reply", form.dataset.repo || "", form.dataset.number || ""]);
+    }
+
+    function captureAgentDrafts() {
+      const drafts = new Map();
+      document.querySelectorAll("#agents-list .assign-form, #agents-list .reply-form").forEach(form => {
+        const values = {};
+        form.querySelectorAll("input[name], textarea[name]").forEach(field => { values[field.name] = field.value; });
+        drafts.set(agentFormKey(form), values);
+      });
+      return drafts;
+    }
+
+    function setFormBusy(form, busy) {
+      form.dataset.submitting = busy ? "true" : "false";
+      form.setAttribute("aria-disabled", busy ? "true" : "false");
+      form.inert = busy;
+      form.querySelectorAll("input, textarea, select, button").forEach(control => { control.disabled = busy; });
+    }
+
+    function applyPartialAssignmentLock(form, key, url) {
+      const result = form.querySelector(".assignment-failure");
+      const submit = form.querySelector('button[type="submit"]');
+      const link = document.createElement("a");
+      link.href = url;
+      link.target = "_blank";
+      link.rel = "noopener";
+      link.textContent = "Issue was created but the agent assignment failed — open it instead of submitting again";
+      result.replaceChildren(link);
+      result.hidden = false;
+      submit.disabled = true;
+      const unlock = () => {
+        partialAssignmentLocks.delete(key);
+        submit.disabled = false;
+        result.hidden = true;
+        result.replaceChildren();
+        form.removeEventListener("input", unlock);
+        form.removeEventListener("change", unlock);
+      };
+      form.addEventListener("input", unlock);
+      form.addEventListener("change", unlock);
+    }
+
+    function restoreAgentFormState(drafts) {
+      document.querySelectorAll("#agents-list .assign-form, #agents-list .reply-form").forEach(form => {
+        const key = agentFormKey(form);
+        const values = drafts.get(key) || {};
+        form.querySelectorAll("input[name], textarea[name]").forEach(field => {
+          if (Object.prototype.hasOwnProperty.call(values, field.name)) field.value = values[field.name];
+        });
+        if (agentFormsInFlight.has(key)) setFormBusy(form, true);
+        const partialUrl = partialAssignmentLocks.get(key);
+        if (partialUrl) applyPartialAssignmentLock(form, key, partialUrl);
+      });
+    }
+
+    async function responseJson(res) {
+      try { return await res.json(); } catch (e) { return {}; }
+    }
+
     async function renderAgents(agents, state) {
       const generation = ++agentRenderGen;
+      latestAgentState = state || {};
       const section = document.getElementById("agents-section");
       const list = document.getElementById("agents-list");
       const owned = Array.isArray(agents) ? agents : [];
       section.classList.toggle("hidden", owned.length === 0);
       if (!owned.length) { list.innerHTML = ""; return; }
       const assignmentSets = await Promise.all(owned.map(async agent => {
+        const ctl = new AbortController();
+        assignmentControllers.add(ctl);
         try {
-          const res = await fetch("/api/assignments?agent=" + encodeURIComponent(agent));
-          if (!res.ok) return [];
-          return (await res.json()).assignments || [];
-        } catch (e) { return []; }
+          const res = await fetch("/api/assignments?agent=" + encodeURIComponent(agent), { signal: ctl.signal });
+          if (!res.ok) {
+            const failure = await responseJson(res);
+            return { assignments: [], error: failure.detail || "HTTP " + res.status };
+          }
+          let body;
+          try { body = await res.json(); } catch (e) {
+            return { assignments: [], error: String(e) };
+          }
+          if (!body || !Array.isArray(body.assignments)) {
+            return { assignments: [], error: "invalid response" };
+          }
+          return { assignments: body.assignments, error: null };
+        } catch (e) {
+          return { assignments: [], error: e.name === "AbortError" ? "request aborted" : String(e) };
+        } finally {
+          assignmentControllers.delete(ctl);
+        }
       }));
-      if (generation !== agentRenderGen || section.contains(document.activeElement)) return;
+      if (generation !== agentRenderGen) return;
+      const drafts = captureAgentDrafts();
       list.innerHTML = owned.map((agent, index) => {
         const sessions = (state.session || []).filter(s => s._github_login === agent).map(s =>
           `<li><a href="/sessions/${encodeURIComponent(s.id)}">${esc(s.id)}</a> — ${esc(s.status)}</li>`
         ).join("") || "<li>No sessions.</li>";
-        const assignments = assignmentSets[index].map(a => {
+        const assignmentResult = assignmentSets[index];
+        const assignments = assignmentResult.error
+          ? `<p class="assignment-load-error">Could not load assignments: ${esc(assignmentResult.error)}</p>`
+          : assignmentResult.assignments.map(a => {
           const comments = (a.comments || []).map(c => `<li><b>${esc(c.author)}</b> ${esc(c.created_at)}<br>${esc(c.body)}</li>`).join("") || "<li>No comments.</li>";
           return `<div class="assignment">
             <a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.repo)}#${esc(a.number)} — ${esc(a.title)}</a>
@@ -484,6 +577,11 @@
             <p class="assignment-failure" hidden></p>
           </form><h4>Assignments</h4>${assignments}</div>`;
       }).join("");
+      restoreAgentFormState(drafts);
+    }
+
+    function repaintAgents() {
+      return renderAgents(window.__ownedAgents || [], latestAgentState);
     }
 
     function setControlEnabled(online) {
@@ -592,6 +690,7 @@
         document.getElementById("signed-in").classList.toggle("hidden", !user);
         if (!user) {
           abortHubFetches();
+          clearHubTables();
           err.hidden = true;
           return;
         }
@@ -753,48 +852,92 @@
       if (!form || !form.classList) return;
       if (form.classList.contains("assign-form")) {
         ev.preventDefault();
+        const formKey = agentFormKey(form);
+        if (agentFormsInFlight.has(formKey)) return;
         const fd = new FormData(form);
         const payload = { agent: form.dataset.agent, repo: fd.get("repo"), title: fd.get("title"), body: fd.get("body") };
-        const res = await fetch("/api/assignments", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
-        if (!res.ok) {
-          let failure = {};
-          try { failure = await res.json(); } catch (e) {}
-          if (typeof failure.url === "string" && failure.url) {
-            const result = form.querySelector(".assignment-failure");
-            const submit = form.querySelector('button[type="submit"]');
-            const link = document.createElement("a");
-            link.href = failure.url;
-            link.target = "_blank";
-            link.rel = "noopener";
-            link.textContent = "Issue was created but the agent assignment failed — open it instead of submitting again";
-            result.replaceChildren(link);
-            result.hidden = false;
-            submit.disabled = true;
-            const unlock = () => {
-              submit.disabled = false;
-              result.hidden = true;
-              result.replaceChildren();
-              form.removeEventListener("input", unlock);
-              form.removeEventListener("change", unlock);
-            };
-            form.addEventListener("input", unlock);
-            form.addEventListener("change", unlock);
-          } else {
-            document.getElementById("err").hidden = false;
-            document.getElementById("err").textContent = failure.detail || "assignment failed";
+        let succeeded = false;
+        agentFormsInFlight.add(formKey);
+        setFormBusy(form, true);
+        try {
+          const res = await fetch("/api/assignments", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+          if (!res.ok) {
+            const failure = await responseJson(res);
+            if (typeof failure.url === "string" && failure.url) {
+              partialAssignmentLocks.set(formKey, failure.url);
+              applyPartialAssignmentLock(form, formKey, failure.url);
+            } else {
+              document.getElementById("err").hidden = false;
+              document.getElementById("err").textContent = failure.detail || "assignment failed";
+            }
+            return;
           }
-          return;
+          form.reset();
+          succeeded = true;
+        } catch (e) {
+          document.getElementById("err").hidden = false;
+          document.getElementById("err").textContent = String(e);
+        } finally {
+          agentFormsInFlight.delete(formKey);
+          setFormBusy(form, false);
+          document.querySelectorAll("#agents-list .assign-form").forEach(current => {
+            if (agentFormKey(current) === formKey) setFormBusy(current, false);
+          });
+          const partialUrl = partialAssignmentLocks.get(formKey);
+          if (partialUrl) {
+            const current = Array.from(document.querySelectorAll("#agents-list .assign-form")).find(item => agentFormKey(item) === formKey);
+            if (current && !current.querySelector(".assignment-failure a")) {
+              applyPartialAssignmentLock(current, formKey, partialUrl);
+            } else if (current) {
+              current.querySelector('button[type="submit"]').disabled = true;
+            }
+          }
         }
-        form.reset(); render(); return;
+        if (succeeded) {
+          partialAssignmentLocks.delete(formKey);
+          document.querySelectorAll("#agents-list .assign-form").forEach(current => {
+            if (agentFormKey(current) === formKey) current.reset();
+          });
+          await repaintAgents();
+        }
+        return;
       }
       if (form.classList.contains("reply-form")) {
         ev.preventDefault();
+        const formKey = agentFormKey(form);
+        if (agentFormsInFlight.has(formKey)) return;
         const fd = new FormData(form);
         const parts = (form.dataset.repo || "").split("/");
         const url = "/api/assignments/" + encodeURIComponent(parts[0]) + "/" + encodeURIComponent(parts[1]) + "/" + encodeURIComponent(form.dataset.number) + "/comments";
-        const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ body: fd.get("body") }) });
-        if (!res.ok) { document.getElementById("err").hidden = false; document.getElementById("err").textContent = (await res.json()).detail || "reply failed"; return; }
-        form.reset(); render();
+        let succeeded = false;
+        agentFormsInFlight.add(formKey);
+        setFormBusy(form, true);
+        try {
+          const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ body: fd.get("body") }) });
+          if (!res.ok) {
+            const failure = await responseJson(res);
+            document.getElementById("err").hidden = false;
+            document.getElementById("err").textContent = failure.detail || "reply failed";
+            return;
+          }
+          form.reset();
+          succeeded = true;
+        } catch (e) {
+          document.getElementById("err").hidden = false;
+          document.getElementById("err").textContent = String(e);
+        } finally {
+          agentFormsInFlight.delete(formKey);
+          setFormBusy(form, false);
+          document.querySelectorAll("#agents-list .reply-form").forEach(current => {
+            if (agentFormKey(current) === formKey) setFormBusy(current, false);
+          });
+        }
+        if (succeeded) {
+          document.querySelectorAll("#agents-list .reply-form").forEach(current => {
+            if (agentFormKey(current) === formKey) current.reset();
+          });
+          await repaintAgents();
+        }
       }
     });
     document.addEventListener("click", async (ev) => {
