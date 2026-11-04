@@ -50,6 +50,7 @@ def test_owner_creates_assignment_and_web_activity(agent_hub: TestClient) -> Non
     activity = next(row for row in state["activity"] if row.get("type") == "assignment.created")
     assert activity["payload"]["agent"] == "helperbot"
     assert activity["payload"]["actor"] == "alice"
+    assert activity["payload"]["issue_key"] == "Acme/Widget#1"
     replica = agent_hub.app.state.hub.store.query_one(
         "SELECT origin_device_id FROM row_replica WHERE table_name = 'activity' AND row_id = ?",
         (activity["id"],),
@@ -72,6 +73,22 @@ def test_assignment_stores_github_canonical_repo_case(agent_hub: TestClient) -> 
     state = agent_hub.get("/api/state").json()
     activity = next(row for row in state["activity"] if row.get("type") == "assignment.created")
     assert activity["payload"]["repo"] == "Acme/Widget"
+    assert activity["payload"]["issue_key"] == "Acme/Widget#1"
+
+    device_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaac03"
+    token = pair_device(agent_hub, "code-alice", device_id)
+    query = agent_hub.post(
+        "/sync/query",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "match": {
+                "type": "assignment.created",
+                "payload.issue_key": "Acme/Widget#1",
+            }
+        },
+    )
+    assert query.status_code == 200, query.text
+    assert [row["row_id"] for row in query.json()["rows"]] == [activity["id"]]
 
 
 def test_assignment_authorization_and_missing_token(agent_hub: TestClient) -> None:
@@ -224,7 +241,13 @@ def test_assignment_list_comments_and_reply_authorization(agent_hub: TestClient)
     reply_call = [call for call in github.issue_calls if call["operation"] == "create_issue_comment"][-1]
     assert reply_call["token"] == "tok-alice"
     state = agent_hub.get("/api/state").json()
-    assert any(row.get("type") == "assignment.reply" for row in state["activity"])
+    reply = next(row for row in state["activity"] if row.get("type") == "assignment.reply")
+    assert reply["payload"]["issue_key"] == "Acme/Widget#1"
+    replica = agent_hub.app.state.hub.store.query_one(
+        "SELECT origin_device_id FROM row_replica WHERE table_name = 'activity' AND row_id = ?",
+        (reply["id"],),
+    )
+    assert replica["origin_device_id"] == "web:alice"
 
     sign_in(agent_hub, "code-bob")
     denied = agent_hub.post(

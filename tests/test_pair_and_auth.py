@@ -38,6 +38,20 @@ def test_pair_issues_token(hub: TestClient) -> None:
     assert pushed.json()["accepted"] == 0
 
 
+def test_pair_rejects_reserved_web_device_ids(hub: TestClient) -> None:
+    for index, device_id in enumerate(("web:alice", "WeB:pretender"), start=1):
+        response = hub.post(
+            "/pair/prepare",
+            json={
+                "device_id": device_id,
+                "challenge": f"reserved-web-origin-{index}",
+                "device_name": "browser impersonator",
+            },
+        )
+        assert response.status_code == 400
+        assert response.json()["detail"] == "web: device ids are reserved"
+
+
 def test_unknown_code_rejected(hub: TestClient) -> None:
     start = hub.get("/auth/github", follow_redirects=False)
     state = start.headers["location"].split("state=")[1].split("&")[0]

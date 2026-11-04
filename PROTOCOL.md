@@ -19,6 +19,8 @@ Anyone may sign in with GitHub. Authorization is not the login; it is team membe
 
 The token is a device credential. It is not a GitHub token. Normally the hub binds `origin_device_id` to the signed-in GitHub login. An owner may select one of their configured agents on the pair page; the device and token are then bound to that agent. Unknown agents return 404 and non-owners return 403. The device row records the human confirmer as `confirmed_by`, including for normal pairing.
 
+The `web:` device-id prefix is reserved for synthetic website origins. `POST /pair/prepare` rejects that prefix case-insensitively; website origins cannot be paired as devices.
+
 ## Events
 
 `POST /sync/push` with `Authorization: Bearer <device-token>`:
@@ -42,6 +44,7 @@ The token is a device credential. It is not a GitHub token. Normally the hub bin
 Rules:
 
 - `origin_device_id` must be the device in the token (otherwise 403).
+- Origins beginning with `web:` (case-insensitive) are reserved for website-created rows. A device bearer cannot push them (403); only the hub may author them through website actions.
 - `origin_seq` is per device, starts at 1, and must be `last + 1` (otherwise 409).
 - Repeating the exact same event is idempotent.
 - Repeating a seq with different content is 409.
@@ -284,7 +287,13 @@ The actor must own the agent. A bearer belonging to an agent is refused. Reposit
 {"repo":"Owner/Name","number":42,"url":"https://github.com/Owner/Name/issues/42","agent":"agent-login","actor":"owner-login"}
 ```
 
-Creation records an `activity` replica with type `assignment.created`; replies record `assignment.reply`. Both use `web:<actor>` origins and contain no OAuth token. GitHub transport errors return bounded 502 messages.
+Creation records an `activity` replica with type `assignment.created`; replies record `assignment.reply`. Both payloads include `issue_key` as `<canonical Owner/Name>#<number>`, use `web:<actor>` origins, and contain no OAuth token. Agents look up mandates with `POST /sync/query` by matching both `type` and `payload.issue_key`, for example:
+
+```json
+{"match":{"type":"assignment.created","payload.issue_key":"Owner/Name#42"}}
+```
+
+GitHub transport errors return bounded 502 messages.
 
 ### Usage
 

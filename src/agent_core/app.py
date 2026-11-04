@@ -234,6 +234,8 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         device_id = _require_str(body, "device_id")
         challenge = _require_str(body, "challenge")
         name = _require_str(body, "device_name")
+        if device_id.lower().startswith("web:"):
+            raise HTTPException(status_code=400, detail="web: device ids are reserved")
         if len(challenge) < 16 or len(challenge) > 128:
             raise HTTPException(status_code=400, detail="challenge length is invalid")
         if len(name) > 128 or len(device_id) > 80:
@@ -535,6 +537,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
             "payload": {
                 "agent": agent,
                 "repo": repo,
+                "issue_key": f"{repo}#{number}",
                 "number": number,
                 "url": url,
                 "title": title,
@@ -590,6 +593,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         token = _github_token(hub, actor)
         try:
             issue_row = await asyncio.to_thread(hub.github.issue, token, repo, number)
+            repo = _issue_repository_name(issue_row) or repo
             assigned_agents = {
                 agent
                 for agent in _issue_assignees(issue_row)
@@ -615,6 +619,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
             "payload": {
                 "agents": sorted(assigned_agents),
                 "repo": repo,
+                "issue_key": f"{repo}#{number}",
                 "number": number,
                 "url": url,
                 "actor": actor,
@@ -1572,6 +1577,8 @@ def _accept_event(
     hub: Hub, device: dict[str, Any], event: dict[str, Any]
 ) -> tuple[list[str], dict[str, Any] | None]:
     origin = event.get("origin_device_id")
+    if isinstance(origin, str) and origin.lower().startswith("web:"):
+        raise HTTPException(status_code=403, detail="web: origins are reserved")
     if origin != device["id"]:
         raise HTTPException(status_code=403, detail="cannot push events for another device")
     table = event.get("table")
