@@ -342,6 +342,8 @@ def test_index_agent_render_preserves_forms_and_handles_fetch_lifecycle() -> Non
     assert "section.contains(document.activeElement)" not in render_agents
     assert "captureAgentDrafts()" in render_agents
     assert "restoreAgentFormState(drafts)" in render_agents
+    assert 'values.__requestId = form.dataset.requestId || ""' in html
+    assert "form.dataset.requestId = values.__requestId" in html
     assert "Could not load assignments:" in render_agents
     assert "try { body = await res.json(); } catch" in assignment_load_fn
     assert "No assignments." in render_agents
@@ -370,6 +372,7 @@ def test_index_agent_render_preserves_forms_and_handles_fetch_lifecycle() -> Non
     assert html.count("abortAssignmentLoads();") == 3
     assert "assignmentOwnerSetKey(user.owned_agents || [])" in html
     assert "assignmentOwnersKey !== nextOwnerKey" in html
+    assert "const choices = [user.login].concat(user.owned_agents || []);" in html
     assert "++agentRenderGen" in clear_fn
     assert "++agentSessionEpoch" in clear_fn
     assert html.count("++agentSessionEpoch") == 1
@@ -405,11 +408,15 @@ def test_index_agent_render_preserves_forms_and_handles_fetch_lifecycle() -> Non
         assert "clearTimeout(postTimeout)" in handler
         assert "agentPostControllers.delete(postCtl)" in handler
         assert "Request did not complete — check the assignment list before submitting again" in handler
+        assert "if (!form.dataset.requestId) form.dataset.requestId = crypto.randomUUID()" in handler
+        assert "request_id:" in handler
+        assert "delete form.dataset.requestId" in handler
         timeout_block = handler.split("catch (e)", 1)[1].split("finally", 1)[0]
         assert 'if (e.name === "AbortError")' in timeout_block
+        assert "delete form.dataset.requestId" not in timeout_block
         assert "expireAssignmentLoad(form.dataset.agent)" in timeout_block
         assert "await repaintAgents()" in timeout_block
-    assert "const failure = await responseJson(res)" in reply_handler
+    assert "const failure = await responseJson(res," in reply_handler
 
 
 def test_session_timeline_truncation_notice_matches_newest_rows() -> None:

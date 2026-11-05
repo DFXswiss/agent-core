@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import replace
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
+from agent_core.app import create_app
+from agent_core.db import Store
+from agent_core.github import FakeGitHub
 from tests.conftest import pair_device, sign_in
 from tests.test_control import _recv_until, _wait_control_connected, session_event
 
@@ -60,6 +66,41 @@ def test_auth_me_lists_owned_agents_only_for_owner(agent_hub: TestClient) -> Non
 
     sign_in(agent_hub, "code-bob")
     assert agent_hub.get("/auth/me").json()["owned_agents"] == []
+
+
+def test_auth_me_sorts_owned_agents_declared_out_of_order(cfg, tmp_path: Path) -> None:
+    roster_path = tmp_path / "sorted-owned-agents.yaml"
+    roster_path.write_text(
+        "teams:\n"
+        "  dfx:\n"
+        "    members: [alice, zetabot, alphabot]\n"
+        "agents:\n"
+        "  zetabot:\n"
+        "    owners: [alice]\n"
+        "  alphabot:\n"
+        "    owners: [alice]\n",
+        encoding="utf-8",
+    )
+    app_cfg = replace(
+        cfg,
+        teams_path=roster_path,
+        database=str(tmp_path / "sorted-owned-agents.sqlite"),
+    )
+    store = Store(app_cfg.database)
+    try:
+        app = create_app(
+            app_cfg,
+            github=FakeGitHub({"code-alice": "alice"}),
+            store=store,
+        )
+        with TestClient(app) as client:
+            sign_in(client, "code-alice")
+            assert client.get("/auth/me").json()["owned_agents"] == [
+                "alphabot",
+                "zetabot",
+            ]
+    finally:
+        store.close()
 
 
 def test_owner_controls_agent_session_including_owner_device_bearer(agent_hub: TestClient) -> None:

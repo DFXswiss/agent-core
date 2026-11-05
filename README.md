@@ -81,6 +81,8 @@ Website API endpoints are documented in [PROTOCOL.md](PROTOCOL.md):
 
 The hub uses only the signed-in human's stored OAuth token for GitHub issue and comment writes. Tokens never enter API responses, activity rows, or browser cookies. Devices remain the sole write owners of their rows; website actions use synthetic `web:<login>` activity origins.
 
+Assignment and reply writes accept an optional lowercase UUID `request_id`. The dashboard keeps the same UUID after a timeout or network error, and the hub appends `<!-- agent-core-request:<request_id> -->` to the GitHub issue or comment. A retry reuses the recorded or marker-matched GitHub write and returns 200 when the matching activity was already recorded, preventing duplicate issues and comments after an ambiguous timeout.
+
 ## Tests
 
 ```bash

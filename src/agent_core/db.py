@@ -156,6 +156,47 @@ class Store:
                 self._conn.rollback()
                 raise
 
+    def record_web_event(
+        self,
+        origin: str,
+        login: str,
+        table: str,
+        op: str,
+        row_id: str,
+        encoded: str,
+        occurred: str,
+    ) -> None:
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                last = self._conn.execute(
+                    "SELECT COALESCE(MAX(origin_seq), 0) AS m FROM ledger_event "
+                    "WHERE origin_device_id = ?",
+                    (origin,),
+                ).fetchone()
+                seq = int(last["m"]) + 1 if last is not None else 1
+                self._conn.execute(
+                    "INSERT INTO ledger_event (origin_device_id, origin_seq, table_name, op, row_id, payload, occurred_at, received_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (origin, seq, table, op, row_id, encoded, occurred, occurred),
+                )
+                if op == "delete":
+                    self._conn.execute(
+                        "DELETE FROM row_replica WHERE table_name = ? AND row_id = ?",
+                        (table, row_id),
+                    )
+                else:
+                    self._conn.execute(
+                        "INSERT INTO row_replica (table_name, row_id, origin_device_id, github_login, payload, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?) "
+                        "ON CONFLICT(table_name, row_id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at",
+                        (table, row_id, origin, login, encoded, occurred),
+                    )
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+
     def put_oauth_token(self, github_login: str, token: str) -> None:
         self.execute(
             "INSERT INTO oauth_token (github_login, token, updated_at) VALUES (?, ?, ?) "

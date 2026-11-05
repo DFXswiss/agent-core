@@ -41,6 +41,11 @@ class GitHub:
     ) -> dict[str, Any]:
         raise NotImplementedError
 
+    def recent_issues_by_creator(
+        self, token: str, repo: str, creator: str
+    ) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
     def repository(self, token: str, repo: str) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -272,6 +277,25 @@ class RealGitHub(GitHub):
             raise GitHubError("GitHub issue creation returned an invalid response")
         return result
 
+    def recent_issues_by_creator(
+        self, token: str, repo: str, creator: str
+    ) -> list[dict[str, Any]]:
+        result = self._request_json(
+            "GET",
+            f"/repos/{repo}/issues",
+            token,
+            params={
+                "creator": creator,
+                "state": "all",
+                "sort": "created",
+                "direction": "desc",
+                "per_page": 30,
+            },
+        )
+        if not isinstance(result, list):
+            raise GitHubError("GitHub recent issue lookup returned an invalid response")
+        return [item for item in result if isinstance(item, dict)]
+
     def repository(self, token: str, repo: str) -> dict[str, Any]:
         result = self._request_json("GET", f"/repos/{repo}", token)
         if not isinstance(result, dict):
@@ -412,6 +436,7 @@ class FakeGitHub(GitHub):
             "title": title,
             "body": body,
             "assignees": assigned,
+            "creator": token.removeprefix("tok-") if token.startswith("tok-") else "unknown",
         }
         self.issues[(canonical_repo, number)] = issue
         self.issue_calls.append(
@@ -425,6 +450,26 @@ class FakeGitHub(GitHub):
             }
         )
         return dict(issue)
+
+    def recent_issues_by_creator(
+        self, token: str, repo: str, creator: str
+    ) -> list[dict[str, Any]]:
+        self.issue_calls.append(
+            {
+                "operation": "recent_issues_by_creator",
+                "token": token,
+                "repo": repo,
+                "creator": creator,
+            }
+        )
+        canonical_repo = self.canonical_repos.get(repo.lower(), repo)
+        rows = [
+            issue
+            for (issue_repo, _number), issue in self.issues.items()
+            if issue_repo.lower() == canonical_repo.lower() and issue.get("creator") == creator
+        ]
+        rows.sort(key=lambda issue: int(issue.get("number", 0)), reverse=True)
+        return [dict(issue) for issue in rows[:30]]
 
     def repository(self, token: str, repo: str) -> dict[str, Any]:
         canonical_repo = self.canonical_repos.get(repo.lower(), repo)

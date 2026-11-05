@@ -55,6 +55,7 @@ ISSUE_CACHE_MAX_ENTRIES = 500
 ASSIGNMENT_ENRICHMENT_LIMIT = 50
 GITHUB_REAUTH_DETAIL = "sign in on the website again"
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+REQUEST_ID_RE = re.compile(r"^[0-9a-f-]{36}$")
 HUB_AUTHORED_ACTIVITY_TYPES = frozenset({"assignment.created", "assignment.reply"})
 _MISSING = object()
 
@@ -493,16 +494,39 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
             raise HTTPException(status_code=400, detail="repo must be Owner/Name")
         title = _bounded_body_string(body, "title", 1, 256)
         issue_body = _bounded_body_string(body, "body", 1, 60000)
+        request_id = _optional_request_id(body)
+        if request_id is not None:
+            replay = _assignment_request_replay(hub, actor, "assignment.created", request_id)
+            if replay is not None:
+                response = _assignment_create_response(replay)
+                if response is not None:
+                    return JSONResponse(response, status_code=200)
         token = _github_token(hub, actor)
         trailer = f"Assigned through {cfg.public_url} by @{actor}."
         posted_body = issue_body.rstrip() + "\n\n" + trailer
+        if request_id is not None:
+            posted_body += "\n\n" + _request_marker(request_id)
         url = ""
         number: int | None = None
         issue_created = False
         try:
-            created = await asyncio.to_thread(
-                hub.github.create_issue, token, repo, title, posted_body, [agent]
-            )
+            created = None
+            if request_id is not None:
+                recent = await asyncio.to_thread(
+                    hub.github.recent_issues_by_creator, token, repo, actor
+                )
+                created = next(
+                    (
+                        issue_row
+                        for issue_row in recent
+                        if _contains_request_marker(issue_row.get("body"), request_id)
+                    ),
+                    None,
+                )
+            if created is None:
+                created = await asyncio.to_thread(
+                    hub.github.create_issue, token, repo, title, posted_body, [agent]
+                )
             issue_created = True
             created_number = created.get("number")
             created_url = created.get("html_url")
@@ -572,6 +596,8 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                 "actor": actor,
             },
         }
+        if request_id is not None:
+            event_payload["payload"]["request_id"] = request_id
         _record_web_event(hub, actor, "activity", "insert", activity_id, event_payload)
         await hub.publish({"type": "events", "login": actor, "count": 1})
         return JSONResponse(
@@ -637,12 +663,25 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
     async def api_assignment_reply(
         request: Request, owner: str, name: str, number: int, body: dict[str, Any]
     ):
-        actor, _device_actor = _request_actor(hub, request)
+        actor, device_actor = _request_actor(hub, request)
+        if device_actor and hub.roster.is_agent(actor):
+            raise HTTPException(
+                status_code=403,
+                detail="not an owner of an agent assigned to this issue",
+            )
         repo = f"{owner}/{name}"
         if REPO_RE.fullmatch(repo) is None or number < 1:
             raise HTTPException(status_code=404, detail="unknown issue")
         comment_body = _bounded_body_string(body, "body", 1, 60000)
+        request_id = _optional_request_id(body)
+        if request_id is not None:
+            replay = _assignment_request_replay(hub, actor, "assignment.reply", request_id)
+            if replay is not None and isinstance(replay.get("url"), str):
+                return JSONResponse({"url": replay["url"]}, status_code=200)
         token = _github_token(hub, actor)
+        posted_body = comment_body
+        if request_id is not None:
+            posted_body += "\n\n" + _request_marker(request_id)
         try:
             issue_row = await asyncio.to_thread(hub.github.issue, token, repo, number)
             # A transferred issue redirects to its new repository and number; comment
@@ -662,9 +701,22 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
             }
             if not owned_assigned:
                 raise HTTPException(status_code=403, detail="not an owner of an agent assigned to this issue")
-            comment = await asyncio.to_thread(
-                hub.github.create_issue_comment, token, repo, number, comment_body
-            )
+            comment = None
+            if request_id is not None:
+                comments = await asyncio.to_thread(hub.github.issue_comments, token, repo, number)
+                comment = next(
+                    (
+                        row
+                        for row in reversed(comments)
+                        if _comment_author(row) == actor
+                        and _contains_request_marker(row.get("body"), request_id)
+                    ),
+                    None,
+                )
+            if comment is None:
+                comment = await asyncio.to_thread(
+                    hub.github.create_issue_comment, token, repo, number, posted_body
+                )
         except HTTPException:
             raise
         except GitHubError as exc:
@@ -692,6 +744,8 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                 "body": comment_body,
             },
         }
+        if request_id is not None:
+            event_payload["payload"]["request_id"] = request_id
         _record_web_event(hub, actor, "activity", "insert", activity_id, event_payload)
         hub.issue_cache.pop((actor, repo, number), None)
         hub.issue_cache.pop((actor, path_repo, path_number), None)
@@ -1082,27 +1136,9 @@ def _record_web_event(
     payload: dict[str, Any],
 ) -> None:
     origin = f"web:{login}"
-    last = hub.store.query_one(
-        "SELECT COALESCE(MAX(origin_seq), 0) AS m FROM ledger_event WHERE origin_device_id = ?",
-        (origin,),
-    )
-    seq = int(last["m"]) + 1 if last is not None else 1
     encoded = dumps(payload)
     occurred = utcnow()
-    hub.store.execute(
-        "INSERT INTO ledger_event (origin_device_id, origin_seq, table_name, op, row_id, payload, occurred_at, received_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (origin, seq, table, op, row_id, encoded, occurred, occurred),
-    )
-    if op == "delete":
-        hub.store.execute("DELETE FROM row_replica WHERE table_name = ? AND row_id = ?", (table, row_id))
-        return
-    hub.store.execute(
-        "INSERT INTO row_replica (table_name, row_id, origin_device_id, github_login, payload, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?) "
-        "ON CONFLICT(table_name, row_id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at",
-        (table, row_id, origin, login, encoded, occurred),
-    )
+    hub.store.record_web_event(origin, login, table, op, row_id, encoded, occurred)
 
 
 def _request_actor(hub: Hub, request: Request) -> tuple[str, bool]:
@@ -1147,6 +1183,67 @@ def _bounded_body_string(body: dict[str, Any], key: str, minimum: int, maximum: 
     if not isinstance(value, str) or len(value) < minimum or len(value) > maximum:
         raise HTTPException(status_code=400, detail=f"{key} must be a string of length {minimum}..{maximum}")
     return value
+
+
+def _optional_request_id(body: dict[str, Any]) -> str | None:
+    if "request_id" not in body:
+        return None
+    request_id = body["request_id"]
+    if not isinstance(request_id, str) or REQUEST_ID_RE.fullmatch(request_id) is None:
+        raise HTTPException(status_code=400, detail="request_id must be a UUID")
+    return request_id
+
+
+def _request_marker(request_id: str) -> str:
+    return f"<!-- agent-core-request:{request_id} -->"
+
+
+def _contains_request_marker(body: Any, request_id: str) -> bool:
+    return isinstance(body, str) and _request_marker(request_id) in body.splitlines()
+
+
+def _comment_author(comment: dict[str, Any]) -> str:
+    user = comment.get("user")
+    if not isinstance(user, dict):
+        return ""
+    login = user.get("login")
+    return login.strip().lower() if isinstance(login, str) else ""
+
+
+def _assignment_request_replay(
+    hub: Hub, actor: str, activity_type: str, request_id: str
+) -> dict[str, Any] | None:
+    rows = hub.store.query(
+        "SELECT payload FROM row_replica WHERE table_name = 'activity' "
+        "AND origin_device_id = ? AND github_login = ? ORDER BY updated_at DESC, row_id DESC",
+        (f"web:{actor}", actor),
+    )
+    for row in rows:
+        payload = loads(row["payload"])
+        if not isinstance(payload, dict) or payload.get("type") != activity_type:
+            continue
+        inner = payload.get("payload")
+        if isinstance(inner, dict) and inner.get("request_id") == request_id:
+            return inner
+    return None
+
+
+def _assignment_create_response(inner: dict[str, Any]) -> dict[str, Any] | None:
+    repo = inner.get("repo")
+    number = inner.get("number")
+    url = inner.get("url")
+    agent = inner.get("agent")
+    actor = inner.get("actor")
+    if (
+        not isinstance(repo, str)
+        or not isinstance(number, int)
+        or isinstance(number, bool)
+        or not isinstance(url, str)
+        or not isinstance(agent, str)
+        or not isinstance(actor, str)
+    ):
+        return None
+    return {"repo": repo, "number": number, "url": url, "agent": agent, "actor": actor}
 
 
 def _bounded_github_error(exc: Exception) -> str:

@@ -533,11 +533,18 @@
       return JSON.stringify(["reply", form.dataset.agent || "", form.dataset.repo || "", form.dataset.number || ""]);
     }
 
+    function clearRenderedRequestIds(formKey) {
+      document.querySelectorAll("#agents-list .assign-form, #agents-list .reply-form").forEach(form => {
+        if (agentFormKey(form) === formKey) delete form.dataset.requestId;
+      });
+    }
+
     function captureAgentDrafts() {
       const drafts = new Map();
       document.querySelectorAll("#agents-list .assign-form, #agents-list .reply-form").forEach(form => {
         const values = {};
         form.querySelectorAll("input[name], textarea[name]").forEach(field => { values[field.name] = field.value; });
+        values.__requestId = form.dataset.requestId || "";
         drafts.set(agentFormKey(form), values);
       });
       return drafts;
@@ -613,14 +620,21 @@
         form.querySelectorAll("input[name], textarea[name]").forEach(field => {
           if (Object.prototype.hasOwnProperty.call(values, field.name)) field.value = values[field.name];
         });
+        if (values.__requestId) form.dataset.requestId = values.__requestId;
         if (agentFormsInFlight.has(key)) setFormBusy(form, true);
         const partialUrl = partialAssignmentLocks.get(key);
         if (partialUrl) applyPartialAssignmentLock(form, key, partialUrl);
       });
     }
 
-    async function responseJson(res) {
-      try { return await res.json(); } catch (e) { return {}; }
+    async function responseJson(res, onParsed) {
+      try {
+        const body = await res.json();
+        if (onParsed) onParsed();
+        return body;
+      } catch (e) {
+        return {};
+      }
     }
 
     function loadAssignmentsForAgent(agent) {
@@ -1020,10 +1034,11 @@
         ev.preventDefault();
         const formKey = agentFormKey(form);
         if (agentFormsInFlight.has(formKey)) return;
+        if (!form.dataset.requestId) form.dataset.requestId = crypto.randomUUID();
         const sessionEpoch = agentSessionEpoch;
         const login = window.__login;
         const fd = new FormData(form);
-        const payload = { agent: form.dataset.agent, repo: fd.get("repo"), title: fd.get("title"), body: fd.get("body") };
+        const payload = { agent: form.dataset.agent, repo: fd.get("repo"), title: fd.get("title"), body: fd.get("body"), request_id: form.dataset.requestId };
         let succeeded = false;
         const postCtl = new AbortController();
         const postTimeout = setTimeout(() => postCtl.abort(), 30000);
@@ -1033,7 +1048,10 @@
         try {
           const res = await fetch("/api/assignments", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal: postCtl.signal });
           if (!res.ok) {
-            const failure = await responseJson(res);
+            const failure = await responseJson(res, () => {
+              delete form.dataset.requestId;
+              clearRenderedRequestIds(formKey);
+            });
             if (sessionEpoch !== agentSessionEpoch || login !== window.__login) return;
             if (typeof failure.url === "string" && failure.url) {
               partialAssignmentLocks.set(formKey, failure.url);
@@ -1044,6 +1062,8 @@
             }
             return;
           }
+          delete form.dataset.requestId;
+          clearRenderedRequestIds(formKey);
           if (sessionEpoch !== agentSessionEpoch || login !== window.__login) return;
           form.reset();
           clearActionError();
@@ -1093,6 +1113,7 @@
         ev.preventDefault();
         const formKey = agentFormKey(form);
         if (agentFormsInFlight.has(formKey)) return;
+        if (!form.dataset.requestId) form.dataset.requestId = crypto.randomUUID();
         const sessionEpoch = agentSessionEpoch;
         const login = window.__login;
         const fd = new FormData(form);
@@ -1105,14 +1126,19 @@
         agentFormsInFlight.add(formKey);
         setFormBusy(form, true);
         try {
-          const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ body: fd.get("body") }), signal: postCtl.signal });
+          const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ body: fd.get("body"), request_id: form.dataset.requestId }), signal: postCtl.signal });
           if (!res.ok) {
-            const failure = await responseJson(res);
+            const failure = await responseJson(res, () => {
+              delete form.dataset.requestId;
+              clearRenderedRequestIds(formKey);
+            });
             if (sessionEpoch !== agentSessionEpoch || login !== window.__login) return;
             document.getElementById("action-err").hidden = false;
             document.getElementById("action-err").textContent = failure.detail || "reply failed";
             return;
           }
+          delete form.dataset.requestId;
+          clearRenderedRequestIds(formKey);
           if (sessionEpoch !== agentSessionEpoch || login !== window.__login) return;
           form.reset();
           clearActionError();

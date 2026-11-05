@@ -21,6 +21,7 @@ ASSIGNMENT = {
     "title": "Investigate the failure",
     "body": "Find the root cause and open a draft pull request.",
 }
+REQUEST_ID = "12345678-1234-1234-1234-123456789abc"
 
 
 class _Response:
@@ -149,12 +150,140 @@ def test_assignment_authorization_and_missing_token(agent_hub: TestClient) -> No
         ),
     ],
 )
-def test_assignment_routes_require_a_session(
+def test_assignment_routes_reject_unauthenticated_requests(
     agent_hub: TestClient, method: str, url: str, payload: dict[str, str] | None
 ) -> None:
     response = agent_hub.request(method, url, json=payload)
     assert response.status_code == 401
     assert response.json() == {"detail": "not signed in"}
+
+
+@pytest.mark.parametrize(
+    ("url", "payload"),
+    [
+        ("/api/assignments", dict(ASSIGNMENT, request_id="not-a-uuid")),
+        ("/api/assignments", dict(ASSIGNMENT, request_id=None)),
+        (
+            "/api/assignments/Acme/Widget/1/comments",
+            {"body": "A reply.", "request_id": "A" * 36},
+        ),
+    ],
+)
+def test_assignment_request_id_must_be_a_lowercase_uuid(
+    agent_hub: TestClient, url: str, payload: dict[str, object]
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    response = agent_hub.post(url, json=payload)
+    assert response.status_code == 400
+    assert response.json() == {"detail": "request_id must be a UUID"}
+
+
+def test_assignment_create_request_id_replays_recorded_success(
+    agent_hub: TestClient,
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    github: FakeGitHub = agent_hub.app.state.hub.github
+    payload = dict(ASSIGNMENT, request_id=REQUEST_ID)
+
+    created = agent_hub.post("/api/assignments", json=payload)
+    replayed = agent_hub.post("/api/assignments", json=payload)
+
+    assert created.status_code == 201
+    assert replayed.status_code == 200
+    # The replay answers with the stored canonical issue link.
+    assert replayed.json() == {**created.json(), "url": "https://github.com/Acme/Widget/issues/1"}
+    calls = [call for call in github.issue_calls if call["operation"] == "create_issue"]
+    assert len(calls) == 1
+    assert calls[0]["body"].splitlines()[-1] == (
+        f"<!-- agent-core-request:{REQUEST_ID} -->"
+    )
+    state = agent_hub.get("/api/state").json()
+    activity = next(row for row in state["activity"] if row.get("type") == "assignment.created")
+    assert activity["payload"]["request_id"] == REQUEST_ID
+
+
+def test_assignment_create_recovers_after_timeout_that_created_the_issue(
+    agent_hub: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    github: FakeGitHub = agent_hub.app.state.hub.github
+    create_issue = github.create_issue
+
+    def create_then_timeout(*args, **kwargs):
+        create_issue(*args, **kwargs)
+        raise GitHubError("GitHub request failed: ReadTimeout")
+
+    monkeypatch.setattr(github, "create_issue", create_then_timeout)
+    payload = dict(ASSIGNMENT, request_id=REQUEST_ID)
+    failed = agent_hub.post("/api/assignments", json=payload)
+    monkeypatch.setattr(github, "create_issue", create_issue)
+    recovered = agent_hub.post("/api/assignments", json=payload)
+
+    assert failed.status_code == 502
+    assert recovered.status_code == 201
+    assert recovered.json()["number"] == 1
+    assert len(
+        [call for call in github.issue_calls if call["operation"] == "create_issue"]
+    ) == 1
+    assert len([row for row in github.issues.values() if row["number"] == 1]) == 1
+
+
+def test_assignment_reply_request_id_replays_recorded_success(
+    agent_hub: TestClient,
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    assert agent_hub.post("/api/assignments", json=ASSIGNMENT).status_code == 201
+    github: FakeGitHub = agent_hub.app.state.hub.github
+    payload = {"body": "A reply.", "request_id": REQUEST_ID}
+
+    created = agent_hub.post("/api/assignments/Acme/Widget/1/comments", json=payload)
+    replayed = agent_hub.post("/api/assignments/Acme/Widget/1/comments", json=payload)
+
+    assert created.status_code == 201
+    assert replayed.status_code == 200
+    calls = [
+        call
+        for call in github.issue_calls
+        if call["operation"] == "create_issue_comment"
+    ]
+    assert len(calls) == 1
+    assert calls[0]["body"].splitlines()[-1] == (
+        f"<!-- agent-core-request:{REQUEST_ID} -->"
+    )
+    state = agent_hub.get("/api/state").json()
+    activity = next(row for row in state["activity"] if row.get("type") == "assignment.reply")
+    assert activity["payload"]["request_id"] == REQUEST_ID
+    assert replayed.json() == {"url": activity["payload"]["url"]}
+
+
+def test_assignment_reply_recovers_after_timeout_that_created_the_comment(
+    agent_hub: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    assert agent_hub.post("/api/assignments", json=ASSIGNMENT).status_code == 201
+    github: FakeGitHub = agent_hub.app.state.hub.github
+    create_comment = github.create_issue_comment
+
+    def comment_then_timeout(*args, **kwargs):
+        create_comment(*args, **kwargs)
+        raise GitHubError("GitHub request failed: ReadTimeout")
+
+    monkeypatch.setattr(github, "create_issue_comment", comment_then_timeout)
+    payload = {"body": "A reply.", "request_id": REQUEST_ID}
+    failed = agent_hub.post("/api/assignments/Acme/Widget/1/comments", json=payload)
+    monkeypatch.setattr(github, "create_issue_comment", create_comment)
+    recovered = agent_hub.post("/api/assignments/Acme/Widget/1/comments", json=payload)
+
+    assert failed.status_code == 502
+    assert recovered.status_code == 201
+    assert len(
+        [
+            call
+            for call in github.issue_calls
+            if call["operation"] == "create_issue_comment"
+        ]
+    ) == 1
+    assert len(github.comments[("Acme/Widget", 1)]) == 1
 
 
 @pytest.mark.parametrize(
@@ -712,6 +841,25 @@ def test_assignment_list_stops_enrichment_and_drops_expired_token(
     assert "alice" not in hub.github_tokens
 
 
+def test_assignment_list_keeps_token_when_enrichment_is_forbidden(
+    agent_hub: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    assert agent_hub.post("/api/assignments", json=ASSIGNMENT).status_code == 201
+    hub = agent_hub.app.state.hub
+
+    def forbidden(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise GitHubError("GitHub request failed: HTTP 403", status_code=403)
+
+    monkeypatch.setattr(hub.github, "issue", forbidden)
+    response = agent_hub.get("/api/assignments", params={"agent": "helperbot"})
+
+    assert response.status_code == 200
+    assert response.json()["assignments"][0]["enriched"] is False
+    assert hub.github_tokens["alice"] == "tok-alice"
+    assert hub.store.get_oauth_token("alice") == "tok-alice"
+
+
 def test_assignment_list_prunes_and_bounds_issue_cache(agent_hub: TestClient) -> None:
     sign_in(agent_hub, "code-alice")
     hub = agent_hub.app.state.hub
@@ -827,6 +975,36 @@ def test_reply_reaches_agents_of_other_owners_but_needs_an_own_agent(
     assert refused.status_code == 403
 
 
+def test_reply_accepts_owner_device_bearer_and_rejects_agent_device_bearer(
+    agent_hub: TestClient,
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    assert agent_hub.post("/api/assignments", json=ASSIGNMENT).status_code == 201
+    owner_token = pair_device(
+        agent_hub, "code-alice", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaac21"
+    )
+    agent_token = _pair_as(
+        agent_hub,
+        "code-alice",
+        "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaac22",
+        "helperbot",
+    )
+
+    owner_reply = agent_hub.post(
+        "/api/assignments/Acme/Widget/1/comments",
+        headers={"Authorization": f"Bearer {owner_token}"},
+        json={"body": "Owner bearer reply."},
+    )
+    agent_reply = agent_hub.post(
+        "/api/assignments/Acme/Widget/1/comments",
+        headers={"Authorization": f"Bearer {agent_token}"},
+        json={"body": "Agent bearer reply."},
+    )
+
+    assert owner_reply.status_code == 201
+    assert agent_reply.status_code == 403
+
+
 def test_reply_to_a_transferred_issue_comments_on_the_issue_that_authorized_it(
     agent_hub: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -886,6 +1064,36 @@ def test_real_github_comments_follows_last_page_for_newest_comments(
     comments = RealGitHub(cfg).issue_comments("tok-alice", "Acme/Widget", 1)
     assert [comment["id"] for comment in comments[-20:]] == list(range(110, 130))
     assert calls == [{"per_page": 100}, {"per_page": 100, "page": 2}]
+
+
+def test_real_github_lists_recent_issues_by_creator(
+    cfg, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[tuple[str, str, dict[str, object]]] = []
+
+    def request(method: str, url: str, **kwargs: object) -> _Response:
+        params = kwargs["params"]
+        assert isinstance(params, dict)
+        seen.append((method, url, params))
+        return _Response(200, [{"number": 3}, {"number": 2}])
+
+    monkeypatch.setattr(httpx, "request", request)
+    rows = RealGitHub(cfg).recent_issues_by_creator("tok-alice", "Acme/Widget", "alice")
+
+    assert [row["number"] for row in rows] == [3, 2]
+    assert seen == [
+        (
+            "GET",
+            "https://api.github.com/repos/Acme/Widget/issues",
+            {
+                "creator": "alice",
+                "state": "all",
+                "sort": "created",
+                "direction": "desc",
+                "per_page": 30,
+            },
+        )
+    ]
 
 
 def test_real_github_comments_fetches_previous_page_when_last_page_is_short(
