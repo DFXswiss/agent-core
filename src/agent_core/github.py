@@ -343,80 +343,73 @@ class RealGitHub(GitHub):
         request_kwargs: dict[str, Any],
         deadline: float,
     ) -> httpx.Response:
+        deadline_reached = threading.Event()
+        active: list[httpx.Response] = []
         with httpx.Client(transport=self._transport) as client:
-            request = client.build_request(
-                method,
-                url,
-                **request_kwargs,
-                timeout=_deadline_timeout(deadline),
-            )
-            redirects = 0
-            while True:
-                request.extensions["timeout"] = _timeout_extensions(
-                    _deadline_timeout(deadline)
-                )
-                response = client.send(
-                    request,
-                    stream=True,
-                    follow_redirects=False,
-                )
-                try:
-                    _check_deadline(deadline)
-                    next_request = response.next_request
-                    if next_request is not None:
-                        redirects += 1
-                        if redirects > client.max_redirects:
-                            raise httpx.TooManyRedirects(
-                                "Exceeded maximum allowed redirects",
-                                request=request,
-                            )
-                        request = next_request
-                        _check_deadline(deadline)
-                        continue
-                    chunks: list[bytes] = []
 
-                    def close_at_deadline(
-                        deadline_event: threading.Event,
-                        deadline_response: httpx.Response,
-                    ) -> None:
-                        deadline_event.set()
-                        deadline_response.close()
-
-                    deadline_reached = threading.Event()
-                    # Closing the response interrupts a read past its remaining budget.
-                    timer = threading.Timer(
-                        _deadline_timeout(deadline),
-                        close_at_deadline,
-                        args=(deadline_reached, response),
-                    )
-                    timer.daemon = True
-                    timer.start()
-                    try:
-                        try:
-                            for chunk in response.iter_bytes():
-                                _check_deadline(deadline)
-                                chunks.append(chunk)
-                        except httpx.HTTPError as exc:
-                            if deadline_reached.is_set():
-                                raise GitHubError(
-                                    "GitHub request skipped: time budget exhausted"
-                                ) from exc
-                            raise
-                    finally:
-                        timer.cancel()
-                    if deadline_reached.is_set():
-                        raise GitHubError(
-                            "GitHub request skipped: time budget exhausted"
-                        )
-                    _check_deadline(deadline)
-                    return httpx.Response(
-                        response.status_code,
-                        headers=response.headers,
-                        content=b"".join(chunks),
-                        request=response.request,
-                    )
-                finally:
+            def close_at_deadline() -> None:
+                deadline_reached.set()
+                for response in list(active):
                     response.close()
+                client.close()
+
+            # One watchdog covers connect, redirects and the body: closing the client
+            # interrupts whatever read or write is still running past the budget.
+            timer = threading.Timer(_deadline_timeout(deadline), close_at_deadline)
+            timer.daemon = True
+            timer.start()
+            try:
+                return self._send_with_deadline(
+                    client, method, url, request_kwargs, deadline, active
+                )
+            except (httpx.HTTPError, httpx.StreamError, RuntimeError) as exc:
+                if deadline_reached.is_set():
+                    raise GitHubError("GitHub request skipped: time budget exhausted") from exc
+                raise
+            finally:
+                timer.cancel()
+
+    def _send_with_deadline(
+        self,
+        client: httpx.Client,
+        method: str,
+        url: str,
+        request_kwargs: dict[str, Any],
+        deadline: float,
+        active: list[httpx.Response],
+    ) -> httpx.Response:
+        request = client.build_request(
+            method, url, **request_kwargs, timeout=_deadline_timeout(deadline)
+        )
+        redirects = 0
+        while True:
+            request.extensions["timeout"] = _timeout_extensions(_deadline_timeout(deadline))
+            response = client.send(request, stream=True, follow_redirects=False)
+            active[:] = [response]
+            try:
+                _check_deadline(deadline)
+                next_request = response.next_request
+                if next_request is not None:
+                    redirects += 1
+                    if redirects > client.max_redirects:
+                        raise httpx.TooManyRedirects(
+                            "Exceeded maximum allowed redirects", request=request
+                        )
+                    request = next_request
+                    continue
+                chunks: list[bytes] = []
+                for chunk in response.iter_bytes():
+                    _check_deadline(deadline)
+                    chunks.append(chunk)
+                _check_deadline(deadline)
+                return httpx.Response(
+                    response.status_code,
+                    headers=response.headers,
+                    content=b"".join(chunks),
+                    request=response.request,
+                )
+            finally:
+                response.close()
 
     def create_issue(
         self, token: str, repo: str, title: str, body: str, assignees: list[str]

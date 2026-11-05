@@ -3146,6 +3146,79 @@ def test_real_github_does_not_follow_redirect_after_deadline(
     assert calls == ["/repos/Acme/Widget/issues/1"]
 
 
+def test_real_github_deadline_closing_before_the_first_chunk_is_a_budget_error(
+    cfg, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import agent_core.github as github_module
+
+    class ImmediateTimer:
+        def __init__(self, _interval, function, args=()):
+            self.function = function
+            self.args = args
+            self.daemon = False
+
+        def start(self) -> None:
+            self.function(*self.args)
+
+        def cancel(self) -> None:
+            pass
+
+    monkeypatch.setattr(github_module.threading, "Timer", ImmediateTimer)
+    github = RealGitHub(
+        cfg,
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json={"number": 1})
+        ),
+    )
+
+    with pytest.raises(GitHubError, match="time budget exhausted") as raised:
+        github.issue("tok-alice", "Acme/Widget", 1, 10.0)
+
+    assert raised.value.status_code is None
+
+
+def test_real_github_deadline_watchdog_runs_before_connect(
+    cfg, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import agent_core.github as github_module
+
+    events: list[str] = []
+    real_timer = github_module.threading.Timer
+
+    class RecordingTimer:
+        def __init__(self, interval, function, args=()):
+            events.append(f"timer {interval:.0f}")
+            self.inner = real_timer(interval, function, args=args)
+            self.daemon = True
+
+        def start(self) -> None:
+            events.append("start")
+            self.inner.daemon = True
+            self.inner.start()
+
+        def cancel(self) -> None:
+            events.append("cancel")
+            self.inner.cancel()
+
+    def request(request: httpx.Request) -> httpx.Response:
+        events.append(f"send {request.url.path}")
+        if request.url.path == "/repos/Acme/Widget/issues/1":
+            return httpx.Response(301, headers={"Location": "/repositories/42/issues/1"})
+        return httpx.Response(200, json={"number": 1})
+
+    monkeypatch.setattr(github_module.threading, "Timer", RecordingTimer)
+    github = RealGitHub(cfg, transport=httpx.MockTransport(request))
+
+    assert github.issue("tok-alice", "Acme/Widget", 1, 10.0)["number"] == 1
+    assert events == [
+        "timer 10",
+        "start",
+        "send /repos/Acme/Widget/issues/1",
+        "send /repositories/42/issues/1",
+        "cancel",
+    ]
+
+
 def test_assignment_github_calls_use_to_thread(
     agent_hub: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
