@@ -1005,6 +1005,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
             posted_body += "\n\n" + _request_marker(request_id)
         token = ""
         comment_write_started = False
+        issue_row: dict[str, Any] | None = None
         try:
             token = _github_token(hub, actor)
             issue_row = await asyncio.to_thread(hub.github.issue, token, repo, number)
@@ -1117,7 +1118,17 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                         status_code=409,
                         detail="request is still in progress; retry shortly",
                     ) from exc
-                raise HTTPException(status_code=502, detail=_bounded_github_error(exc)) from exc
+                reply_failure: dict[str, Any] = {"detail": _bounded_github_error(exc)}
+                if issue_row is not None:
+                    issue_url = issue_row.get("html_url")
+                    reply_failure["url"] = _stored_github_issue_url(
+                        repo, number, issue_url if isinstance(issue_url, str) else ""
+                    )
+                    reply_failure["number"] = number
+                return JSONResponse(
+                    _request_id_error_content(request, 502, reply_failure),
+                    status_code=502,
+                )
             if (
                 request_id is not None
                 and not getattr(request.state, "request_id_prior_write", False)

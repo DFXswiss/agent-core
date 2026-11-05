@@ -1591,6 +1591,8 @@ def test_recovering_reply_reports_a_lasting_github_error_and_keeps_the_reservati
     assert recovering.json()["request_id_final"] is False
     if expected == 502:
         assert f"HTTP {status_code}" in recovering.json()["detail"]
+        assert recovering.json()["url"] == "https://github.com/Acme/Widget/issues/1"
+        assert recovering.json()["number"] == 1
     assert dict(reservation) == {"status": "pending", "prior_write": 1}
 
 
