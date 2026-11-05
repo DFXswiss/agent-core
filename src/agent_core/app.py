@@ -415,19 +415,12 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
     def index() -> HTMLResponse:
         return _dashboard_html()
 
-    def _session_page_response() -> HTMLResponse:
+    @app.api_route("/session", methods=["GET", "HEAD"])
+    def session_page_query() -> HTMLResponse:
         page = STATIC / "session.html"
         if not page.is_file():
             raise HTTPException(status_code=500, detail="session page is missing")
         return HTMLResponse(page.read_text(encoding="utf-8"))
-
-    @app.api_route("/session", methods=["GET", "HEAD"])
-    def session_page_query(id: str) -> HTMLResponse:
-        return _session_page_response()
-
-    @app.api_route("/sessions/{session_id}", methods=["GET", "HEAD"])
-    def session_page(session_id: str) -> HTMLResponse:
-        return _session_page_response()
 
     @app.api_route("/favicon.ico", methods=["GET", "HEAD"])
     def favicon_ico() -> FileResponse:
@@ -737,11 +730,11 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                     }),
                     status_code=502,
                 )
-        except HTTPException as exc:
-            if request_id is not None and not issue_write_started:
+        except HTTPException:
+            if request_id is not None:
                 if (
-                    exc.detail == GITHUB_TOKEN_REQUIRED_DETAIL
-                    and getattr(request.state, "request_id_prior_write", False)
+                    getattr(request.state, "request_id_prior_write", False)
+                    or issue_write_started
                 ):
                     hub.store.expire_request(
                         actor, "assignment.created", request_id, request_owner
@@ -1238,24 +1231,17 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
     def api_session_detail(request: Request, session_id: str) -> dict[str, Any]:
         return _session_detail_response(request, session_id)
 
-    def _session_timeline_response(request: Request, session_id: str) -> dict[str, Any]:
+    @app.get("/api/session-timeline")
+    def api_session_timeline_query(request: Request, id: str) -> dict[str, Any]:
         login = hub.session_login(request)
-        session_row = _visible_session_row(hub, login, session_id)
+        session_row = _visible_session_row(hub, login, id)
         rows = _session_timeline(hub, session_row, hub.visible(login))
         truncated = len(rows) > TIMELINE_ROW_CAP
         return {
-            "session_id": session_id,
+            "session_id": id,
             "timeline": rows[-TIMELINE_ROW_CAP:],
             "truncated": truncated,
         }
-
-    @app.get("/api/session-timeline")
-    def api_session_timeline_query(request: Request, id: str) -> dict[str, Any]:
-        return _session_timeline_response(request, id)
-
-    @app.get("/api/sessions/{session_id}/timeline")
-    def api_session_timeline(request: Request, session_id: str) -> dict[str, Any]:
-        return _session_timeline_response(request, session_id)
 
     async def _session_control_response(
         request: Request, session_id: str, body: dict[str, Any]
@@ -1712,7 +1698,7 @@ def _request_id_error_is_final(
     if not getattr(request.state, "request_id_sent", False):
         return None
     if status_code in (400, 403, 404):
-        return True
+        return not getattr(request.state, "request_id_prior_write", False)
     if status_code != 409:
         return False
     if detail == REQUEST_FINGERPRINT_CONFLICT_DETAIL:

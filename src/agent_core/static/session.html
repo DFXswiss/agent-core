@@ -84,17 +84,7 @@
     async function load() {
       const notice = document.getElementById("notice");
       try {
-        // URLSearchParams already decodes the query value. Old path links remain
-        // supported and decode their final segment exactly once.
-        let sessionId = new URLSearchParams(location.search).get("id");
-        if (sessionId === null) {
-          const parts = location.pathname.split("/").filter(Boolean);
-          try {
-            sessionId = decodeURIComponent(parts[parts.length - 1] || "");
-          } catch (_err) {
-            throw new Error("Invalid session id.");
-          }
-        }
+        const sessionId = new URLSearchParams(location.search).get("id");
         if (!sessionId) throw new Error("Invalid session id.");
         document.getElementById("session-id").textContent = sessionId;
         const response = await fetch(`/api/session-timeline?id=${encodeURIComponent(sessionId)}`);

@@ -96,10 +96,6 @@ def load_roster(path: Path) -> Roster:
     return Roster(teams=out, agents=agents)
 
 
-def load_teams(path: Path) -> dict[str, list[str]]:
-    return load_roster(path).teams
-
-
 def visible_logins(login: str, teams: dict[str, list[str]]) -> set[str]:
     self = login.strip().lower()
     if self == "":

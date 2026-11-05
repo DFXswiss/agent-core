@@ -77,7 +77,7 @@ Website API endpoints are documented in [PROTOCOL.md](PROTOCOL.md):
 - `POST /api/assignments` and `GET /api/assignments?agent=<login>`
 - `POST /api/assignments/{owner}/{name}/{number}/comments`
 - `GET /api/usage`
-- `GET /session?id=<id>`, `GET /api/session?id=<id>`, `GET /api/session/terminal?id=<id>`, `POST /api/session/control?id=<id>`, and `GET /api/session-timeline?id=<id>` (path-based session routes remain supported)
+- `GET /session?id=<id>`, `GET /api/session?id=<id>`, `GET /api/session/terminal?id=<id>`, `POST /api/session/control?id=<id>`, and `GET /api/session-timeline?id=<id>`
 
 The hub uses only the signed-in human's stored OAuth token for GitHub issue and comment writes. Tokens never enter API responses, activity rows, or browser cookies. Devices remain the sole write owners of their rows; website actions use synthetic `web:<login>` activity origins.
 

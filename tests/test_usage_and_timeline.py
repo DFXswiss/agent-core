@@ -16,23 +16,45 @@ def test_usage_and_timeline_apis_require_a_session(
     for path in (
         "/api/usage",
         "/api/session-timeline?id=missing",
-        "/api/sessions/missing/timeline",
     ):
         response = agent_hub.get(path)
         assert response.status_code == 401
         assert response.json() == {"detail": "not signed in"}
 
 
-@pytest.mark.parametrize("path", ["/session?id=missing", "/sessions/missing"])
 def test_session_page_direct_entry_without_cookie_is_static_html(
-    agent_hub: TestClient, path: str
+    agent_hub: TestClient,
 ) -> None:
-    response = agent_hub.get(path)
+    response = agent_hub.get("/session?id=missing")
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/html")
     assert "session-timeline" in response.text
     assert agent_hub.get("/api/session-timeline?id=missing").status_code == 401
+
+
+def test_session_page_without_id_is_static_html(agent_hub: TestClient) -> None:
+    response = agent_hub.get("/session")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert "Invalid session id." in response.text
+
+
+def test_session_timeline_without_id_is_a_client_error(
+    agent_hub: TestClient,
+) -> None:
+    response = agent_hub.get("/api/session-timeline")
+
+    assert 400 <= response.status_code < 500
+
+
+def test_removed_session_page_path_returns_404(agent_hub: TestClient) -> None:
+    assert agent_hub.get("/sessions/abc").status_code == 404
+
+
+def test_removed_session_timeline_path_returns_404(agent_hub: TestClient) -> None:
+    assert agent_hub.get("/api/sessions/abc/timeline").status_code == 404
 
 
 @pytest.mark.parametrize("session_id", ["..", "a/b", "x y"])
@@ -526,7 +548,9 @@ def test_timeline_order_relations_and_visibility(agent_hub: TestClient) -> None:
             login="bob",
             payload={"id": row_id, **relation},
         )
-    response = agent_hub.get("/api/sessions/timeline-session/timeline")
+    response = agent_hub.get(
+        "/api/session-timeline", params={"id": "timeline-session"}
+    )
     assert response.status_code == 200
     body = response.json()
     assert [row["row_id"] for row in body["timeline"]] == [
@@ -544,11 +568,11 @@ def test_timeline_order_relations_and_visibility(agent_hub: TestClient) -> None:
     ]
     assert lane["payload"]["payload"]["tools_truncated"] is True
     assert body["truncated"] is False
-    assert agent_hub.get("/sessions/timeline-session").status_code == 200
+    assert agent_hub.get("/session?id=timeline-session").status_code == 200
 
     sign_in(agent_hub, "code-dave")
-    assert agent_hub.get("/api/sessions/timeline-session/timeline").status_code == 404
-    assert agent_hub.get("/sessions/timeline-session").status_code == 200
+    assert agent_hub.get("/api/session-timeline?id=timeline-session").status_code == 404
+    assert agent_hub.get("/session?id=timeline-session").status_code == 200
 
 
 def test_timeline_equal_times_sort_by_row_id_then_table(
@@ -628,7 +652,7 @@ def test_timeline_truncates_at_5000(agent_hub: TestClient) -> None:
                 stamp,
             ),
         )
-    body = agent_hub.get("/api/sessions/long-session/timeline").json()
+    body = agent_hub.get("/api/session-timeline?id=long-session").json()
     assert body["truncated"] is True
     assert len(body["timeline"]) == 5000
     assert body["timeline"][0]["row_id"] == "long-activity-0001"
@@ -690,7 +714,9 @@ def test_timeline_preserves_the_tool_renderer_contract(agent_hub: TestClient) ->
         },
     )
 
-    response = agent_hub.get("/api/sessions/tool-contract-session/timeline")
+    response = agent_hub.get(
+        "/api/session-timeline?id=tool-contract-session"
+    )
     assert response.status_code == 200
     views = {
         row["row_id"]: row["tools"]
@@ -711,9 +737,9 @@ def test_session_page_handles_ids_and_signed_out_timeline_fetches() -> None:
         Path(__file__).resolve().parents[1] / "src" / "agent_core" / "static" / "session.html"
     ).read_text(encoding="utf-8")
     load_fn = html[html.index("async function load()") :]
-    # location.pathname is percent-encoded: decode exactly once, inside load()'s try.
-    assert html.count("decodeURIComponent(") == 1
-    assert load_fn.index("try {") < load_fn.index("decodeURIComponent(")
+    assert 'const sessionId = new URLSearchParams(location.search).get("id");' in load_fn
+    assert "location.pathname" not in load_fn
+    assert "decodeURIComponent(" not in html
     assert "encodeURIComponent(sessionId)" in html
     assert "if (response.status === 401)" in html
     assert 'link.href = "/"' in html
@@ -782,7 +808,9 @@ def test_timeline_tool_view_maps_fields_and_legacy_fallback(
             "payload": inner,
         },
     )
-    timeline = agent_hub.get("/api/sessions/tool-view-session/timeline").json()["timeline"]
+    timeline = agent_hub.get(
+        "/api/session-timeline?id=tool-view-session"
+    ).json()["timeline"]
     run = next(row for row in timeline if row["row_id"] == "tool-view-run")
     assert run["tools"] == expected
     assert all("tools" not in row for row in timeline if row["row_id"] != "tool-view-run")

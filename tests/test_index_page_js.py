@@ -35,6 +35,7 @@ const cases = [
   [201, {{}}, true],
   [400, {{request_id_final: true}}, true],
   [403, {{request_id_final: true}}, true],
+  [403, {{request_id_final: false}}, false],
   [404, {{request_id_final: true}}, true],
   [409, {{request_id_final: true}}, true],
   [409, {{request_id_final: false}}, false],
@@ -218,7 +219,7 @@ async function submit(form) {
   const assignmentPayload = JSON.parse(posts[0].options.body);
   posts[0].next.resolve({
     ok: false,
-    status: 502,
+    status: 403,
     json: async () => ({detail: "verification failed", request_id_final: false, url: "https://github.com/Acme/Widget/issues/7"}),
   });
   await firstRun;

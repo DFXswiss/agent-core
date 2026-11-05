@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -373,9 +374,40 @@ class RealGitHub(GitHub):
                         _check_deadline(deadline)
                         continue
                     chunks: list[bytes] = []
-                    for chunk in response.iter_bytes():
-                        _check_deadline(deadline)
-                        chunks.append(chunk)
+
+                    def close_at_deadline(
+                        deadline_event: threading.Event,
+                        deadline_response: httpx.Response,
+                    ) -> None:
+                        deadline_event.set()
+                        deadline_response.close()
+
+                    deadline_reached = threading.Event()
+                    # Closing the response interrupts a read past its remaining budget.
+                    timer = threading.Timer(
+                        _deadline_timeout(deadline),
+                        close_at_deadline,
+                        args=(deadline_reached, response),
+                    )
+                    timer.daemon = True
+                    timer.start()
+                    try:
+                        try:
+                            for chunk in response.iter_bytes():
+                                _check_deadline(deadline)
+                                chunks.append(chunk)
+                        except httpx.HTTPError as exc:
+                            if deadline_reached.is_set():
+                                raise GitHubError(
+                                    "GitHub request skipped: time budget exhausted"
+                                ) from exc
+                            raise
+                    finally:
+                        timer.cancel()
+                    if deadline_reached.is_set():
+                        raise GitHubError(
+                            "GitHub request skipped: time budget exhausted"
+                        )
                     _check_deadline(deadline)
                     return httpx.Response(
                         response.status_code,

@@ -19,7 +19,10 @@ def _session_html() -> str:
 
 
 def _run_session_page(
-    status: int, payload: dict[str, object] | None = None
+    status: int,
+    payload: dict[str, object] | None = None,
+    *,
+    search: str = "?id=session-1",
 ) -> dict[str, object]:
     node = shutil.which("node")
     assert node is not None, "node is required to run the session page test"
@@ -58,12 +61,16 @@ global.document = {
 };
 const responseStatus = __STATUS__;
 const responsePayload = __PAYLOAD__;
-global.fetch = async () => ({
-  status: responseStatus,
-  ok: responseStatus >= 200 && responseStatus < 300,
-  json: async () => responsePayload,
-});
-global.location = {pathname: "/session", search: "?id=session-1"};
+let fetchedUrl = "";
+global.fetch = async url => {
+  fetchedUrl = url;
+  return {
+    status: responseStatus,
+    ok: responseStatus >= 200 && responseStatus < 300,
+    json: async () => responsePayload,
+  };
+};
+global.location = {pathname: "/session", search: __SEARCH__};
 load().then(() => {
   const notice = elements.get("notice");
   process.stdout.write(JSON.stringify({
@@ -71,11 +78,14 @@ load().then(() => {
     noticeClasses: [...notice.classes],
     body: elements.get("timeline-body").innerHTML,
     sessionId: elements.get("session-id").textContent,
+    fetchedUrl,
   }));
 }).catch(error => { process.stderr.write(String(error.stack || error)); process.exitCode = 1; });
 '''
-    script = script.replace("__STATUS__", str(status)).replace(
-        "__PAYLOAD__", json.dumps(payload or {})
+    script = (
+        script.replace("__STATUS__", str(status))
+        .replace("__PAYLOAD__", json.dumps(payload or {}))
+        .replace("__SEARCH__", json.dumps(search))
     )
     completed = subprocess.run(
         [node, "-"],
@@ -87,26 +97,7 @@ load().then(() => {
     return json.loads(completed.stdout)
 
 
-@pytest.mark.parametrize(
-    ("pathname", "search", "session_id", "timeline_url"),
-    [
-        (
-            "/session",
-            "?id=a%2F..%2Fb",
-            "a/../b",
-            "/api/session-timeline?id=a%2F..%2Fb",
-        ),
-        (
-            "/sessions/abc%20d",
-            "",
-            "abc d",
-            "/api/session-timeline?id=abc%20d",
-        ),
-    ],
-)
-def test_session_page_shows_signed_out_notice_and_decodes_session_id(
-    pathname: str, search: str, session_id: str, timeline_url: str
-) -> None:
+def test_session_page_shows_signed_out_notice_and_decodes_session_id() -> None:
     node = shutil.which("node")
     # Node is a test requirement (README); a missing node must fail, not skip.
     assert node is not None, "node is required to run the session page test"
@@ -147,7 +138,7 @@ global.fetch = async url => {{
   fetchedUrl = url;
   return {{status: 401, ok: false}};
 }};
-global.location = {{pathname: {json.dumps(pathname)}, search: {json.dumps(search)}}};
+global.location = {{pathname: "/session", search: "?id=a%2F..%2Fb"}};
 
 {functions}
 
@@ -177,9 +168,18 @@ load().then(() => {{
     assert json.loads(completed.stdout) == {
         "notice": "Signed out — sign in on the dashboard",
         "href": "/",
-        "sessionId": session_id,
-        "fetchedUrl": timeline_url,
+        "sessionId": "a/../b",
+        "fetchedUrl": "/api/session-timeline?id=a%2F..%2Fb",
     }
+
+
+def test_session_page_renders_existing_error_for_missing_id() -> None:
+    out = _run_session_page(200, search="")
+
+    assert out["notice"] == "Error: Invalid session id."
+    assert out["noticeClasses"] == ["error"]
+    assert out["sessionId"] == ""
+    assert out["fetchedUrl"] == ""
 
 
 def test_session_page_renders_timeline_rows_and_safe_assignment_links() -> None:

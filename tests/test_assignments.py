@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-import time
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 import agent_core.app as app_module
@@ -86,6 +87,19 @@ class _SlowByteStream(httpx.SyncByteStream):
         for chunk in self._chunks:
             self._clock[0] += self._seconds_per_chunk
             yield chunk
+
+
+class _BlockingByteStream(httpx.SyncByteStream):
+    def __init__(self) -> None:
+        self.closed = threading.Event()
+
+    def __iter__(self):
+        closed = self.closed.wait(timeout=1.0)
+        assert closed, "response body was not closed at its deadline"
+        return iter(())
+
+    def close(self) -> None:
+        self.closed.set()
 
 
 def test_real_github_error_exposes_http_status(
@@ -1397,6 +1411,7 @@ def test_assignment_reply_keeps_prior_write_reservation_after_ownership_denial(
     )
 
     assert denied.status_code == 403
+    assert denied.json()["request_id_final"] is False
     assert reservation is not None
     assert dict(reservation) == {
         "status": "pending",
@@ -1412,6 +1427,102 @@ def test_assignment_reply_keeps_prior_write_reservation_after_ownership_denial(
         ]
     ) == 1
     assert len(github.comments[("Acme/Widget", 1)]) == 1
+
+
+def test_assignment_create_keeps_prior_write_reservation_after_renew_failure(
+    agent_hub: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    hub = agent_hub.app.state.hub
+    github: FakeGitHub = hub.github
+    github.omit_assignees_on_create = True
+    create_issue = github.create_issue
+
+    def create_then_timeout(*args, **kwargs):
+        create_issue(*args, **kwargs)
+        raise GitHubError("GitHub request failed: ReadTimeout")
+
+    monkeypatch.setattr(github, "create_issue", create_then_timeout)
+    payload = dict(ASSIGNMENT, request_id=REQUEST_ID)
+    assert agent_hub.post("/api/assignments", json=payload).status_code == 502
+    monkeypatch.setattr(github, "create_issue", create_issue)
+    hub.store.execute(
+        "UPDATE request_reservation SET lease_until = ? WHERE request_id = ?",
+        ("2000-01-01T00:00:00Z", REQUEST_ID),
+    )
+    renew = hub.store.renew_request
+    monkeypatch.setattr(hub.store, "renew_request", lambda *_args: False)
+
+    lost = agent_hub.post("/api/assignments", json=payload)
+    reservation = hub.store.query_one(
+        "SELECT status, lease_until, prior_write FROM request_reservation "
+        "WHERE request_id = ?",
+        (REQUEST_ID,),
+    )
+    monkeypatch.setattr(hub.store, "renew_request", renew)
+    recovered = agent_hub.post("/api/assignments", json=payload)
+
+    assert lost.status_code == 409
+    assert lost.json()["request_id_final"] is False
+    assert reservation is not None
+    assert dict(reservation) == {
+        "status": "pending",
+        "lease_until": "",
+        "prior_write": 1,
+    }
+    assert recovered.status_code == 201, recovered.text
+    assert len(
+        [call for call in github.issue_calls if call["operation"] == "create_issue"]
+    ) == 1
+
+
+def test_assignment_create_keeps_prior_write_reservation_after_not_found(
+    agent_hub: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    hub = agent_hub.app.state.hub
+    github: FakeGitHub = hub.github
+    create_issue = github.create_issue
+
+    def create_then_timeout(*args, **kwargs):
+        create_issue(*args, **kwargs)
+        raise GitHubError("GitHub request failed: ReadTimeout")
+
+    monkeypatch.setattr(github, "create_issue", create_then_timeout)
+    payload = dict(ASSIGNMENT, request_id=REQUEST_ID)
+    assert agent_hub.post("/api/assignments", json=payload).status_code == 502
+    monkeypatch.setattr(github, "create_issue", create_issue)
+    hub.store.execute(
+        "UPDATE request_reservation SET lease_until = ? WHERE request_id = ?",
+        ("2000-01-01T00:00:00Z", REQUEST_ID),
+    )
+    issue = github.issue
+
+    def missing_issue(*_args, **_kwargs):
+        raise HTTPException(status_code=404, detail="unknown issue")
+
+    monkeypatch.setattr(github, "issue", missing_issue)
+    denied = agent_hub.post("/api/assignments", json=payload)
+    reservation = hub.store.query_one(
+        "SELECT status, lease_until, prior_write FROM request_reservation "
+        "WHERE request_id = ?",
+        (REQUEST_ID,),
+    )
+    monkeypatch.setattr(github, "issue", issue)
+    recovered = agent_hub.post("/api/assignments", json=payload)
+
+    assert denied.status_code == 404
+    assert denied.json()["request_id_final"] is False
+    assert reservation is not None
+    assert dict(reservation) == {
+        "status": "pending",
+        "lease_until": "",
+        "prior_write": 1,
+    }
+    assert recovered.status_code == 201, recovered.text
+    assert len(
+        [call for call in github.issue_calls if call["operation"] == "create_issue"]
+    ) == 1
 
 
 def test_concurrent_assignment_requests_create_one_issue(
@@ -2268,34 +2379,24 @@ def test_assignment_enrichment_stops_at_deadline_during_streamed_body(
     sign_in(agent_hub, "code-alice")
     assert agent_hub.post("/api/assignments", json=ASSIGNMENT).status_code == 201
     hub = agent_hub.app.state.hub
-    clock = [0.0]
     calls: list[str] = []
-    body = dumps(
-        {
-            "number": 1,
-            "state": "open",
-            "assignees": [{"login": "helperbot"}],
-        }
-    ).encode()
+    stream = _BlockingByteStream()
 
     def request(request: httpx.Request) -> httpx.Response:
         calls.append(request.url.path)
-        middle = len(body) // 2
-        return httpx.Response(
-            200,
-            stream=_SlowByteStream(
-                [body[:middle], body[middle:]], clock, 6.0
-            ),
-        )
+        return httpx.Response(200, stream=stream)
 
-    monkeypatch.setattr(app_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(app_module, "ASSIGNMENT_ENRICHMENT_SECONDS", 0.2)
     hub.github = RealGitHub(hub.cfg, transport=httpx.MockTransport(request))
+    started = time.monotonic()
     response = agent_hub.get("/api/assignments", params={"agent": "helperbot"})
+    elapsed = time.monotonic() - started
 
     assert response.status_code == 200
     assert response.json()["assignments"][0]["enriched"] is False
     assert calls == ["/repos/Acme/Widget/issues/1"]
-    assert clock[0] == 12.0
+    assert stream.closed.is_set()
+    assert elapsed < 0.75
 
 
 def test_assignment_list_enriches_only_newest_50(agent_hub: TestClient) -> None:
@@ -2665,7 +2766,7 @@ def test_reply_targets_every_assigned_agent_timeline(
         payload={"id": "second-agent-session", "created_at": "2026-11-05T12:00:00Z"},
     )
     timeline = two_agent_hub.get(
-        "/api/sessions/second-agent-session/timeline"
+        "/api/session-timeline?id=second-agent-session"
     ).json()["timeline"]
     assert reply["id"] in [row["row_id"] for row in timeline]
 
