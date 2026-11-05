@@ -103,6 +103,35 @@ def test_auth_me_sorts_owned_agents_declared_out_of_order(cfg, tmp_path: Path) -
         store.close()
 
 
+def test_auth_me_sorts_team_names_declared_out_of_order(cfg, tmp_path: Path) -> None:
+    roster_path = tmp_path / "sorted-team-names.yaml"
+    roster_path.write_text(
+        "teams:\n"
+        "  zeta:\n"
+        "    members: [alice]\n"
+        "  alpha:\n"
+        "    members: [alice]\n",
+        encoding="utf-8",
+    )
+    app_cfg = replace(
+        cfg,
+        teams_path=roster_path,
+        database=str(tmp_path / "sorted-team-names.sqlite"),
+    )
+    store = Store(app_cfg.database)
+    try:
+        app = create_app(
+            app_cfg,
+            github=FakeGitHub({"code-alice": "alice"}),
+            store=store,
+        )
+        with TestClient(app) as client:
+            sign_in(client, "code-alice")
+            assert client.get("/auth/me").json()["teams"] == ["alpha", "zeta"]
+    finally:
+        store.close()
+
+
 def test_owner_controls_agent_session_including_owner_device_bearer(agent_hub: TestClient) -> None:
     agent_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaab05"
     owner_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaab06"

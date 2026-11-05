@@ -95,6 +95,14 @@ class Store:
         device_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(device)")}
         if "confirmed_by" not in device_columns:
             self._conn.execute("ALTER TABLE device ADD COLUMN confirmed_by TEXT")
+        self._migrate_request_reservation()
+
+    def _migrate_request_reservation(self) -> None:
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS request_reservation ("
+            "actor TEXT, activity_type TEXT, request_id TEXT, status TEXT NOT NULL, "
+            "lease_until TEXT NOT NULL, PRIMARY KEY (actor, activity_type, request_id))"
+        )
 
     def close(self) -> None:
         with self._lock:
@@ -155,6 +163,61 @@ class Store:
             except Exception:
                 self._conn.rollback()
                 raise
+
+    def reserve_request(
+        self,
+        actor: str,
+        activity_type: str,
+        request_id: str,
+        now: str,
+        lease_until: str,
+    ) -> str:
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._conn.execute(
+                    "SELECT status, lease_until FROM request_reservation "
+                    "WHERE actor = ? AND activity_type = ? AND request_id = ?",
+                    (actor, activity_type, request_id),
+                ).fetchone()
+                if row is None:
+                    self._conn.execute(
+                        "INSERT INTO request_reservation "
+                        "(actor, activity_type, request_id, status, lease_until) "
+                        "VALUES (?, ?, ?, 'pending', ?)",
+                        (actor, activity_type, request_id, lease_until),
+                    )
+                    result = "reserved"
+                elif row["status"] == "done":
+                    result = "done"
+                elif row["lease_until"] > now:
+                    result = "busy"
+                else:
+                    self._conn.execute(
+                        "UPDATE request_reservation SET lease_until = ? "
+                        "WHERE actor = ? AND activity_type = ? AND request_id = ?",
+                        (lease_until, actor, activity_type, request_id),
+                    )
+                    result = "reserved"
+                self._conn.commit()
+                return result
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    def finish_request(self, actor: str, activity_type: str, request_id: str) -> None:
+        self.execute(
+            "UPDATE request_reservation SET status = 'done' "
+            "WHERE actor = ? AND activity_type = ? AND request_id = ?",
+            (actor, activity_type, request_id),
+        )
+
+    def release_request(self, actor: str, activity_type: str, request_id: str) -> None:
+        self.execute(
+            "DELETE FROM request_reservation WHERE actor = ? AND activity_type = ? "
+            "AND request_id = ? AND status = 'pending'",
+            (actor, activity_type, request_id),
+        )
 
     def record_web_event(
         self,

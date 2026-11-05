@@ -15,12 +15,36 @@ def test_usage_timeline_and_session_page_require_a_session(
 ) -> None:
     for path in (
         "/api/usage",
+        "/api/session-timeline?id=missing",
         "/api/sessions/missing/timeline",
+        "/session?id=missing",
         "/sessions/missing",
     ):
         response = agent_hub.get(path)
         assert response.status_code == 401
         assert response.json() == {"detail": "not signed in"}
+
+
+@pytest.mark.parametrize("session_id", ["..", "a/b", "x y"])
+def test_timeline_query_route_preserves_path_unsafe_session_ids(
+    agent_hub: TestClient, session_id: str
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    _insert_replica(
+        agent_hub,
+        table="session",
+        row_id=session_id,
+        updated_at="2026-11-05T10:00:00Z",
+        login="helperbot",
+        payload={"id": session_id, "created_at": "2026-11-05T10:00:00Z"},
+    )
+
+    response = agent_hub.get("/api/session-timeline", params={"id": session_id})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["session_id"] == session_id
+    assert response.json()["timeline"][0]["row_id"] == session_id
+    assert agent_hub.get("/session", params={"id": session_id}).status_code == 200
 
 
 def test_usage_aggregates_lanes_openrouter_and_keeps_grok_shape(agent_hub: TestClient) -> None:
@@ -182,6 +206,55 @@ def test_usage_arrays_are_newest_first_with_row_id_tiebreak(agent_hub: TestClien
         "grok-tie-b",
         "grok-tie-a",
         "grok-old",
+    ]
+
+
+def test_usage_order_uses_replica_change_not_payload_time(agent_hub: TestClient) -> None:
+    sign_in(agent_hub, "code-alice")
+    for suffix, updated_at, payload_at in (
+        ("older-payload", "2026-11-05T12:00:00Z", "2026-11-04T08:00:00Z"),
+        ("newer-payload", "2026-11-05T11:00:00Z", "2026-11-04T09:00:00Z"),
+    ):
+        _insert_replica(
+            agent_hub,
+            table="activity",
+            row_id=f"lane-change-{suffix}",
+            updated_at=updated_at,
+            login="helperbot",
+            payload={
+                "id": f"lane-change-{suffix}",
+                "type": "lane.run",
+                "session_id": f"session-{suffix}",
+                "ran_at": payload_at,
+                "payload": {"vendor": "anthropic", "model": "model-a"},
+            },
+        )
+        _insert_replica(
+            agent_hub,
+            table="activity",
+            row_id=f"account-change-{suffix}",
+            updated_at=updated_at,
+            login="helperbot",
+            payload={
+                "id": f"account-change-{suffix}",
+                "type": "usage.snapshot",
+                "payload": {
+                    "vendor": "openrouter",
+                    "account": f"account-{suffix}",
+                    "fetched_at": payload_at,
+                },
+            },
+        )
+
+    body = agent_hub.get("/api/usage").json()
+
+    assert [row["session_id"] for row in body["lanes"]] == [
+        "session-older-payload",
+        "session-newer-payload",
+    ]
+    assert [row["account"] for row in body["accounts"]] == [
+        "account-older-payload",
+        "account-newer-payload",
     ]
 
 

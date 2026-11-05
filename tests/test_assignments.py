@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import httpx
@@ -163,6 +165,12 @@ def test_assignment_routes_reject_unauthenticated_requests(
     [
         ("/api/assignments", dict(ASSIGNMENT, request_id="not-a-uuid")),
         ("/api/assignments", dict(ASSIGNMENT, request_id=None)),
+        ("/api/assignments", dict(ASSIGNMENT, request_id="-" * 36)),
+        ("/api/assignments", dict(ASSIGNMENT, request_id="a" * 36)),
+        (
+            "/api/assignments",
+            dict(ASSIGNMENT, request_id="12345678-1234-1234-1234-123456789ABC"),
+        ),
         (
             "/api/assignments/Acme/Widget/1/comments",
             {"body": "A reply.", "request_id": "A" * 36},
@@ -217,9 +225,15 @@ def test_assignment_create_recovers_after_timeout_that_created_the_issue(
     payload = dict(ASSIGNMENT, request_id=REQUEST_ID)
     failed = agent_hub.post("/api/assignments", json=payload)
     monkeypatch.setattr(github, "create_issue", create_issue)
+    busy = agent_hub.post("/api/assignments", json=payload)
+    agent_hub.app.state.hub.store.execute(
+        "UPDATE request_reservation SET lease_until = ? WHERE request_id = ?",
+        ("2000-01-01T00:00:00Z", REQUEST_ID),
+    )
     recovered = agent_hub.post("/api/assignments", json=payload)
 
     assert failed.status_code == 502
+    assert busy.status_code == 409
     assert recovered.status_code == 201
     assert recovered.json()["number"] == 1
     assert len(
@@ -272,9 +286,15 @@ def test_assignment_reply_recovers_after_timeout_that_created_the_comment(
     payload = {"body": "A reply.", "request_id": REQUEST_ID}
     failed = agent_hub.post("/api/assignments/Acme/Widget/1/comments", json=payload)
     monkeypatch.setattr(github, "create_issue_comment", create_comment)
+    busy = agent_hub.post("/api/assignments/Acme/Widget/1/comments", json=payload)
+    agent_hub.app.state.hub.store.execute(
+        "UPDATE request_reservation SET lease_until = ? WHERE request_id = ?",
+        ("2000-01-01T00:00:00Z", REQUEST_ID),
+    )
     recovered = agent_hub.post("/api/assignments/Acme/Widget/1/comments", json=payload)
 
     assert failed.status_code == 502
+    assert busy.status_code == 409
     assert recovered.status_code == 201
     assert len(
         [
@@ -284,6 +304,144 @@ def test_assignment_reply_recovers_after_timeout_that_created_the_comment(
         ]
     ) == 1
     assert len(github.comments[("Acme/Widget", 1)]) == 1
+
+
+def test_assignment_request_is_busy_without_calling_github(
+    agent_hub: TestClient,
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    hub = agent_hub.app.state.hub
+    assert hub.store.reserve_request(
+        "alice",
+        "assignment.created",
+        REQUEST_ID,
+        "2026-11-05T10:00:00Z",
+        "9999-01-01T00:00:00Z",
+    ) == "reserved"
+    calls_before = list(hub.github.issue_calls)
+
+    response = agent_hub.post(
+        "/api/assignments", json=dict(ASSIGNMENT, request_id=REQUEST_ID)
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "request is still in progress; retry shortly"
+    }
+    assert hub.github.issue_calls == calls_before
+
+
+def test_completed_assignment_request_without_replay_row_is_conflict(
+    agent_hub: TestClient,
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    hub = agent_hub.app.state.hub
+    assert hub.store.reserve_request(
+        "alice",
+        "assignment.created",
+        REQUEST_ID,
+        "2026-11-05T10:00:00Z",
+        "2026-11-05T10:02:00Z",
+    ) == "reserved"
+    hub.store.finish_request("alice", "assignment.created", REQUEST_ID)
+    calls_before = list(hub.github.issue_calls)
+
+    response = agent_hub.post(
+        "/api/assignments", json=dict(ASSIGNMENT, request_id=REQUEST_ID)
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "request already completed; reload the assignment list"
+    }
+    assert hub.github.issue_calls == calls_before
+
+
+def test_assignment_expired_request_reservation_is_taken_over(
+    agent_hub: TestClient,
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    hub = agent_hub.app.state.hub
+    assert hub.store.reserve_request(
+        "alice",
+        "assignment.created",
+        REQUEST_ID,
+        "2000-01-01T00:00:00Z",
+        "2000-01-01T00:02:00Z",
+    ) == "reserved"
+
+    response = agent_hub.post(
+        "/api/assignments", json=dict(ASSIGNMENT, request_id=REQUEST_ID)
+    )
+
+    assert response.status_code == 201, response.text
+    reservation = hub.store.query_one(
+        "SELECT status FROM request_reservation WHERE actor = ? "
+        "AND activity_type = ? AND request_id = ?",
+        ("alice", "assignment.created", REQUEST_ID),
+    )
+    assert reservation is not None
+    assert reservation["status"] == "done"
+
+
+def test_assignment_reply_releases_reservation_after_prewrite_denial(
+    agent_hub: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    assert agent_hub.post("/api/assignments", json=ASSIGNMENT).status_code == 201
+    github: FakeGitHub = agent_hub.app.state.hub.github
+    original_issue = github.issue
+    issue_calls = 0
+
+    def deny_once(token: str, repo: str, number: int) -> dict:
+        nonlocal issue_calls
+        issue_calls += 1
+        issue = original_issue(token, repo, number)
+        if issue_calls == 1:
+            issue["assignees"] = []
+        return issue
+
+    monkeypatch.setattr(github, "issue", deny_once)
+    payload = {"body": "A reply.", "request_id": REQUEST_ID}
+
+    denied = agent_hub.post("/api/assignments/Acme/Widget/1/comments", json=payload)
+    retried = agent_hub.post("/api/assignments/Acme/Widget/1/comments", json=payload)
+
+    assert denied.status_code == 403
+    assert retried.status_code == 201, retried.text
+    assert issue_calls == 2
+
+
+def test_concurrent_assignment_requests_create_one_issue(
+    agent_hub: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    github: FakeGitHub = agent_hub.app.state.hub.github
+    original_create = github.create_issue
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocking_create(*args, **kwargs):
+        entered.set()
+        assert release.wait(timeout=5)
+        return original_create(*args, **kwargs)
+
+    monkeypatch.setattr(github, "create_issue", blocking_create)
+    payload = dict(ASSIGNMENT, request_id=REQUEST_ID)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(agent_hub.post, "/api/assignments", json=payload)
+        assert entered.wait(timeout=5)
+        second = executor.submit(agent_hub.post, "/api/assignments", json=payload)
+        second_response = second.result(timeout=5)
+        release.set()
+        first_response = first.result(timeout=5)
+
+    assert sorted((first_response.status_code, second_response.status_code)) == [201, 409]
+    busy = first_response if first_response.status_code == 409 else second_response
+    assert busy.json() == {"detail": "request is still in progress; retry shortly"}
+    assert len(
+        [call for call in github.issue_calls if call["operation"] == "create_issue"]
+    ) == 1
 
 
 @pytest.mark.parametrize(
@@ -1064,6 +1222,32 @@ def test_real_github_comments_follows_last_page_for_newest_comments(
     comments = RealGitHub(cfg).issue_comments("tok-alice", "Acme/Widget", 1)
     assert [comment["id"] for comment in comments[-20:]] == list(range(110, 130))
     assert calls == [{"per_page": 100}, {"per_page": 100, "page": 2}]
+
+
+@pytest.mark.parametrize("invalid_page", [1, 2])
+def test_real_github_comments_rejects_non_list_page(
+    cfg, monkeypatch: pytest.MonkeyPatch, invalid_page: int
+) -> None:
+    def request(_method: str, _url: str, **kwargs: object) -> _Response:
+        params = kwargs["params"]
+        assert isinstance(params, dict)
+        page = int(params.get("page", 1))
+        if page == invalid_page:
+            return _Response(200, {"message": "unexpected object"})
+        return _Response(
+            200,
+            [{"id": 1}],
+            {
+                "Link": '<https://api.github.com/repos/Acme/Widget/issues/1/comments?per_page=100&page=2>; rel="last"'
+            },
+        )
+
+    monkeypatch.setattr(httpx, "request", request)
+
+    with pytest.raises(
+        GitHubError, match="GitHub comment lookup returned an invalid response"
+    ):
+        RealGitHub(cfg).issue_comments("tok-alice", "Acme/Widget", 1)
 
 
 def test_real_github_lists_recent_issues_by_creator(

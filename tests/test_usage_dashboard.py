@@ -23,6 +23,7 @@ def test_dashboard_html_has_usage_table(hub: TestClient) -> None:
     assert 'row._github_login || ""' in body
     assert 'function sessionLink(value)' in body
     assert 'const sessionId = typeof value === "string" ? value : ""' in body
+    assert 'href="/session?id=${encodeURIComponent(sessionId)}"' in body
     assert 'sessionLink(row.session_id)' in body
     assert 'href="/sessions/${encodeURIComponent(row.session_id || "")}"' not in body
 

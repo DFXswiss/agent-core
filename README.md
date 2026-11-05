@@ -77,13 +77,15 @@ Website API endpoints are documented in [PROTOCOL.md](PROTOCOL.md):
 - `POST /api/assignments` and `GET /api/assignments?agent=<login>`
 - `POST /api/assignments/{owner}/{name}/{number}/comments`
 - `GET /api/usage`
-- `GET /api/sessions/{id}/timeline`
+- `GET /session?id=<id>` and `GET /api/session-timeline?id=<id>` (path-based session routes remain supported)
 
 The hub uses only the signed-in human's stored OAuth token for GitHub issue and comment writes. Tokens never enter API responses, activity rows, or browser cookies. Devices remain the sole write owners of their rows; website actions use synthetic `web:<login>` activity origins.
 
-Assignment and reply writes accept an optional lowercase UUID `request_id`. The dashboard keeps the same UUID after a timeout or network error, and the hub appends `<!-- agent-core-request:<request_id> -->` to the GitHub issue or comment. A retry reuses the recorded or marker-matched GitHub write and returns 200 when the matching activity was already recorded, preventing duplicate issues and comments after an ambiguous timeout.
+Assignment and reply writes accept an optional lowercase UUID `request_id`. The dashboard keeps the same UUID after a timeout or network error, and the hub appends `<!-- agent-core-request:<request_id> -->` to the GitHub issue or comment. The hub reserves each actor, activity type, and request id while the write is in progress; a concurrent request returns 409. A later retry reuses the recorded or marker-matched GitHub write and returns 200 when the matching activity was already recorded, preventing duplicate issues and comments after an ambiguous timeout.
 
 ## Tests
+
+Node.js is required for the dashboard and session page tests.
 
 ```bash
 pip install -e ".[test]"

@@ -16,10 +16,11 @@ Every list on the website, and every array of rows in `GET /api/state`, is **new
 - Store tables (`session`, `task`, `pings`, and the other replica keys in `/api/state`): `row_replica.updated_at` descending, then `row_id` descending.
 - Devices: `created_at` descending, then `id` descending.
 
-There are two documented exceptions:
+There are three documented exceptions:
 
-- `GET /api/sessions/{id}/timeline` is a log and is therefore oldest first.
+- `GET /api/session-timeline?id=<id>` (and legacy `GET /api/sessions/{id}/timeline`) is a log and is therefore oldest first.
 - The owned-agents list (`GET /auth/me` `owned_agents` and the dashboard **Agents** section) follows the roster in `teams.yaml`, sorted by login, because roster entries carry no change time. The pair page's login selector lists the signed-in login first, then the same owned-agents list.
+- The signed-in user's team names (`GET /auth/me` `teams`) are sorted by name, because roster entries carry no change time.
 
 The website renders `/api/state` in that order. A filter must keep relative order. Do not append a new row at the bottom.
 

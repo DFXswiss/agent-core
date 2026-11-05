@@ -372,7 +372,8 @@ def test_index_agent_render_preserves_forms_and_handles_fetch_lifecycle() -> Non
     assert html.count("abortAssignmentLoads();") == 3
     assert "assignmentOwnerSetKey(user.owned_agents || [])" in html
     assert "assignmentOwnersKey !== nextOwnerKey" in html
-    assert "const choices = [user.login].concat(user.owned_agents || []);" in html
+    assert "return [user.login].concat(user.owned_agents || []);" in html
+    assert 'fillPairSelect(document.getElementById("pair-as"), user);' in html
     assert "++agentRenderGen" in clear_fn
     assert "++agentSessionEpoch" in clear_fn
     assert html.count("++agentSessionEpoch") == 1

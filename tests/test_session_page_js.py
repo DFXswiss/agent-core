@@ -8,10 +8,29 @@ from pathlib import Path
 import pytest
 
 
-def test_session_page_shows_signed_out_notice_and_decoded_session_id() -> None:
+@pytest.mark.parametrize(
+    ("pathname", "search", "session_id", "timeline_url"),
+    [
+        (
+            "/session",
+            "?id=a%2F..%2Fb",
+            "a/../b",
+            "/api/session-timeline?id=a%2F..%2Fb",
+        ),
+        (
+            "/sessions/abc%20d",
+            "",
+            "abc d",
+            "/api/session-timeline?id=abc%20d",
+        ),
+    ],
+)
+def test_session_page_shows_signed_out_notice_and_decodes_session_id(
+    pathname: str, search: str, session_id: str, timeline_url: str
+) -> None:
     node = shutil.which("node")
-    if node is None:
-        pytest.skip("node is not installed")
+    # Node is a test requirement (README); a missing node must fail, not skip.
+    assert node is not None, "node is required to run the session page test"
 
     html = (
         Path(__file__).resolve().parents[1]
@@ -50,8 +69,12 @@ global.document = {{
   getElementById: id => elements.get(id),
   createElement: tag => new StubElement(tag),
 }};
-global.fetch = async () => ({{status: 401, ok: false}});
-global.location = {{pathname: "/sessions/abc%20d"}};
+let fetchedUrl = "";
+global.fetch = async url => {{
+  fetchedUrl = url;
+  return {{status: 401, ok: false}};
+}};
+global.location = {{pathname: {json.dumps(pathname)}, search: {json.dumps(search)}}};
 
 {functions}
 
@@ -62,6 +85,7 @@ load().then(() => {{
     notice: notice.textContent,
     href: link.href,
     sessionId: elements.get("session-id").textContent,
+    fetchedUrl,
   }}));
 }}).catch(error => {{
   process.stderr.write(String(error));
@@ -80,5 +104,6 @@ load().then(() => {{
     assert json.loads(completed.stdout) == {
         "notice": "Signed out — sign in on the dashboard",
         "href": "/",
-        "sessionId": "abc d",
+        "sessionId": session_id,
+        "fetchedUrl": timeline_url,
     }

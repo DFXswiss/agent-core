@@ -84,18 +84,20 @@
     async function load() {
       const notice = document.getElementById("notice");
       try {
-        const parts = location.pathname.split("/").filter(Boolean);
-        // location.pathname is percent-encoded: decode the segment exactly once here,
-        // inside the try, so a malformed escape shows the error instead of a stuck page.
-        let sessionId = "";
-        try {
-          sessionId = decodeURIComponent(parts[parts.length - 1] || "");
-        } catch (_err) {
-          throw new Error("Invalid session id.");
+        // URLSearchParams already decodes the query value. Old path links remain
+        // supported and decode their final segment exactly once.
+        let sessionId = new URLSearchParams(location.search).get("id");
+        if (sessionId === null) {
+          const parts = location.pathname.split("/").filter(Boolean);
+          try {
+            sessionId = decodeURIComponent(parts[parts.length - 1] || "");
+          } catch (_err) {
+            throw new Error("Invalid session id.");
+          }
         }
         if (!sessionId) throw new Error("Invalid session id.");
         document.getElementById("session-id").textContent = sessionId;
-        const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/timeline`);
+        const response = await fetch(`/api/session-timeline?id=${encodeURIComponent(sessionId)}`);
         if (response.status === 401) {
           showSignedOut();
           return;

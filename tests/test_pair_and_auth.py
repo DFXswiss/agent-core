@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
+from agent_core.db import utcnow
+from agent_core.tokens import issue
 from tests.conftest import pair_device, sign_in
 
 
@@ -50,6 +52,43 @@ def test_pair_rejects_reserved_web_device_ids(hub: TestClient) -> None:
         )
         assert response.status_code == 400
         assert response.json()["detail"] == "web: device ids are reserved"
+
+
+def test_pair_confirm_rejects_preupgrade_reserved_device_id(hub: TestClient) -> None:
+    challenge = "reserved-before-upgrade"
+    hub.app.state.hub.store.execute(
+        "INSERT INTO pending_pair "
+        "(challenge, device_id, device_name, created_at, token, github_login) "
+        "VALUES (?, ?, ?, ?, NULL, NULL)",
+        (challenge, "WeB:legacy", "legacy browser", utcnow()),
+    )
+    sign_in(hub, "code-alice")
+
+    response = hub.post("/pair/confirm", json={"challenge": challenge})
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "web: device ids are reserved"}
+
+
+def test_reserved_preupgrade_device_token_is_unknown(hub: TestClient) -> None:
+    token_id = "legacy-web-token"
+    device_id = "web:legacy"
+    hub.app.state.hub.store.execute(
+        "INSERT INTO device "
+        "(id, github_login, name, token_id, created_at, revoked_at, confirmed_by) "
+        "VALUES (?, ?, ?, ?, ?, NULL, ?)",
+        (device_id, "alice", "legacy browser", token_id, utcnow(), "alice"),
+    )
+    token = issue(hub.app.state.hub.cfg.session_secret, "alice", device_id, token_id)
+
+    response = hub.post(
+        "/sync/push",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"events": []},
+    )
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "unknown device token"}
 
 
 def test_unknown_code_rejected(hub: TestClient) -> None:

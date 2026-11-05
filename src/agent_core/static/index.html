@@ -324,6 +324,24 @@
       ++agentRenderGen;
     }
 
+    // Pair selector: the signed-in login first, then the owned agents (sorted by the hub).
+    function pairChoices(user) {
+      return [user.login].concat(user.owned_agents || []);
+    }
+
+    function fillPairSelect(select, user) {
+      const choices = pairChoices(user);
+      const selected = select.value;
+      select.innerHTML = choices.map(value => `<option value="${esc(value)}">${esc(value)}</option>`).join("");
+      if (choices.includes(selected)) select.value = selected;
+    }
+
+    function pairConfirmPayload(challenge, selected, login) {
+      const payload = { challenge };
+      if (selected && selected !== login) payload.as_login = selected;
+      return payload;
+    }
+
     function clearError() {
       const err = document.getElementById("err");
       err.hidden = true;
@@ -434,7 +452,7 @@
     function sessionLink(value) {
       const sessionId = typeof value === "string" ? value : "";
       return sessionId
-        ? `<a href="/sessions/${encodeURIComponent(sessionId)}">${esc(sessionId)}</a>`
+        ? `<a href="/session?id=${encodeURIComponent(sessionId)}">${esc(sessionId)}</a>`
         : esc(sessionId);
     }
 
@@ -881,11 +899,7 @@
         document.getElementById("k-people").textContent = (user.visible || []).length;
         if (challenge) {
           document.getElementById("pair-box").classList.remove("hidden");
-          const pairAs = document.getElementById("pair-as");
-          const choices = [user.login].concat(user.owned_agents || []);
-          const selected = pairAs.value;
-          pairAs.innerHTML = choices.map(value => `<option value="${esc(value)}">${esc(value)}</option>`).join("");
-          if (choices.includes(selected)) pairAs.value = selected;
+          fillPairSelect(document.getElementById("pair-as"), user);
         }
       } catch (e) {
         if (gen !== renderGen) return;
@@ -986,9 +1000,7 @@
       location.href = "/";
     };
     document.getElementById("confirm-pair").onclick = async () => {
-      const selected = document.getElementById("pair-as").value;
-      const payload = { challenge };
-      if (selected && selected !== window.__login) payload.as_login = selected;
+      const payload = pairConfirmPayload(challenge, document.getElementById("pair-as").value, window.__login);
       const res = await fetch("/pair/confirm", {
         method: "POST",
         headers: { "Content-Type": "application/json" },

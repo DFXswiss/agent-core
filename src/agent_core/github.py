@@ -337,7 +337,7 @@ class RealGitHub(GitHub):
         first, headers = self._request_json_with_headers(
             "GET", path, token, params={"per_page": 100}
         )
-        first_items = [item for item in first if isinstance(item, dict)] if isinstance(first, list) else []
+        first_items = _comment_page_items(first)
         last_page = _link_page(headers.get("link", ""), "last")
         if last_page is None or last_page <= 1:
             return first_items
@@ -345,7 +345,7 @@ class RealGitHub(GitHub):
         last, last_headers = self._request_json_with_headers(
             "GET", path, token, params={"per_page": 100, "page": last_page}
         )
-        last_items = [item for item in last if isinstance(item, dict)] if isinstance(last, list) else []
+        last_items = _comment_page_items(last)
         if len(last_items) >= 20:
             return last_items
 
@@ -357,10 +357,14 @@ class RealGitHub(GitHub):
         previous = self._request_json(
             "GET", path, token, params={"per_page": 100, "page": previous_page}
         )
-        previous_items = (
-            [item for item in previous if isinstance(item, dict)] if isinstance(previous, list) else []
-        )
+        previous_items = _comment_page_items(previous)
         return previous_items + last_items
+
+
+def _comment_page_items(body: Any) -> list[dict[str, Any]]:
+    if not isinstance(body, list):
+        raise GitHubError("GitHub comment lookup returned an invalid response")
+    return [item for item in body if isinstance(item, dict)]
 
 
 def _link_page(link_header: str, relation: str) -> int | None:

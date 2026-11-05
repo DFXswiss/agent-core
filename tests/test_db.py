@@ -54,9 +54,43 @@ def test_store_migrates_device_confirmed_by_without_losing_rows(tmp_path: Path) 
         row = store.query_one("SELECT * FROM device WHERE id = ?", ("old-device",))
 
         assert "confirmed_by" in columns
+        assert store.query_one(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+            ("request_reservation",),
+        ) is not None
         assert row is not None
         assert row["github_login"] == "alice"
         assert row["confirmed_by"] is None
+    finally:
+        store.close()
+
+
+def test_request_reservation_busy_expiry_finish_and_release(tmp_path: Path) -> None:
+    store = Store(str(tmp_path / "reservations.sqlite"))
+    key = ("alice", "assignment.created", "request-one")
+    try:
+        assert store.reserve_request(
+            *key, "2026-11-05T10:00:00Z", "2026-11-05T10:02:00Z"
+        ) == "reserved"
+        assert store.reserve_request(
+            *key, "2026-11-05T10:01:00Z", "2026-11-05T10:03:00Z"
+        ) == "busy"
+        assert store.reserve_request(
+            *key, "2026-11-05T10:02:00Z", "2026-11-05T10:04:00Z"
+        ) == "reserved"
+        store.finish_request(*key)
+        assert store.reserve_request(
+            *key, "2026-11-05T10:05:00Z", "2026-11-05T10:07:00Z"
+        ) == "done"
+
+        released = ("alice", "assignment.reply", "request-two")
+        assert store.reserve_request(
+            *released, "2026-11-05T10:00:00Z", "2026-11-05T10:02:00Z"
+        ) == "reserved"
+        store.release_request(*released)
+        assert store.reserve_request(
+            *released, "2026-11-05T10:00:01Z", "2026-11-05T10:02:01Z"
+        ) == "reserved"
     finally:
         store.close()
 
