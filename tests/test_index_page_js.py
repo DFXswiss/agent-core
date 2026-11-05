@@ -101,9 +101,12 @@ class StubForm {
     this.attributes = {};
     this.inert = false;
     this.controls = [
-      ...Object.keys(values).map(name => ({name, disabled: false, value: values[name]})),
+      ...Object.keys(values).map(name => name === "deviation"
+        ? ({name, disabled: false, type: "checkbox", checked: values[name] === true, value: "authorized"})
+        : ({name, disabled: false, value: values[name]})),
       {name: "submit", disabled: false, type: "submit"},
     ];
+    this.deviation = this.controls.find(control => control.name === "deviation") || null;
     this.submit = this.controls[this.controls.length - 1];
     this.result = new StubResult();
     this.listeners = {};
@@ -116,6 +119,7 @@ class StubForm {
   querySelector(selector) {
     if (selector === ".assignment-failure") return this.result;
     if (selector === 'button[type="submit"]') return this.submit;
+    if (selector === 'input[name="deviation"]') return this.deviation;
     if (selector === ".assignment-failure a") return this.result.children[0] || null;
     return null;
   }
@@ -156,7 +160,7 @@ const timeouts = new Map();
 global.setTimeout = callback => { const id = ++timeoutId; timeouts.set(id, callback); return id; };
 global.clearTimeout = id => timeouts.delete(id);
 const actionError = {hidden: true, textContent: ""};
-const assignForm = new StubForm("assign-form", {agent: "helperbot"}, {repo: "Acme/Widget", title: "Fix", body: "Details"});
+const assignForm = new StubForm("assign-form", {agent: "helperbot"}, {repo: "Acme/Widget", title: "Fix", body: "Details", deviation: false});
 const replyForm = new StubForm("reply-form", {agent: "helperbot", repo: "Acme/Widget", number: "7"}, {body: "Reply"});
 let submitHandler;
 global.document = {
@@ -196,6 +200,13 @@ async function submit(form) {
   return submitHandler({target: form, preventDefault() {}});
 }
 (async () => {
+  await submit(assignForm);
+  const unchecked = {
+    postCount: posts.length,
+    message: actionError.textContent,
+    visible: !actionError.hidden,
+  };
+  assignForm.deviation.checked = true;
   const firstRun = submit(assignForm);
   const busyDuringPost = {
     submitting: assignForm.dataset.submitting,
@@ -204,6 +215,7 @@ async function submit(form) {
     controls: assignForm.controls.map(control => control.disabled),
   };
   const retryId = JSON.parse(posts[0].options.body).request_id;
+  const assignmentPayload = JSON.parse(posts[0].options.body);
   posts[0].next.resolve({
     ok: false,
     status: 502,
@@ -243,6 +255,8 @@ async function submit(form) {
   [...timeouts.values()][0]();
   await timeoutRun;
   process.stdout.write(JSON.stringify({
+    unchecked,
+    assignmentPayload,
     busyDuringPost,
     retryId,
     retryState,
@@ -266,11 +280,17 @@ async function submit(form) {
         [node, "-"], input=script, capture_output=True, text=True, check=True, timeout=30
     )
     out = json.loads(result.stdout)
+    assert out["unchecked"] == {
+        "postCount": 0,
+        "message": "Authorize no deviation from the repository's contribution rules before assigning.",
+        "visible": True,
+    }
+    assert out["assignmentPayload"]["deviation"] == {"declared": False}
     assert out["busyDuringPost"] == {
         "submitting": "true",
         "ariaDisabled": "true",
         "inert": True,
-        "controls": [True, True, True, True],
+        "controls": [True, True, True, True, True],
     }
     assert out["retryState"] == {
         "requestId": out["retryId"],
@@ -329,8 +349,8 @@ class ThrowingStorage {{
 const storage = new StubStorage();
 const formKey = JSON.stringify(["assign", "helperbot"]);
 const key = pendingRequestKey("alice", formKey);
-const payload = JSON.stringify({{agent: "helperbot", repo: "Acme/Widget", title: "T", body: "B"}});
-const changedPayload = JSON.stringify({{agent: "helperbot", repo: "Acme/Widget", title: "Changed", body: "B"}});
+const payload = JSON.stringify({{agent: "helperbot", repo: "Acme/Widget", title: "T", body: "B", deviation: {{declared: false}}}});
+const changedPayload = JSON.stringify({{agent: "helperbot", repo: "Acme/Widget", title: "Changed", body: "B", deviation: {{declared: false}}}});
 const first = pendingRequestId(storage, key, payload);
 const stored = JSON.parse(storage.getItem(key));
 const reused = pendingRequestId(storage, key, payload);
@@ -371,6 +391,7 @@ process.stdout.write(JSON.stringify({{
             "repo": "Acme/Widget",
             "title": "T",
             "body": "B",
+            "deviation": {"declared": False},
         },
         separators=(",", ":"),
     )
@@ -399,6 +420,8 @@ def test_agent_card_decisions_and_drafts() -> None:
             "agentCardState",
             "captureAgentDraft",
             "restoreAgentDraft",
+            "agentDraftFieldValue",
+            "restoreAgentDraftField",
             "partialAssignmentLockUrl",
         )
     )
@@ -417,10 +440,15 @@ const states = [
 const alphaKey = JSON.stringify(["assign", "alphabot"]);
 const zetaKey = JSON.stringify(["assign", "zetabot"]);
 let drafts = {{}};
-drafts = captureAgentDraft(drafts, alphaKey, {{repo: "Acme/One", title: "A"}}, "request-a");
-drafts = captureAgentDraft(drafts, zetaKey, {{repo: "Acme/Two", title: "Z"}}, "request-z");
+drafts = captureAgentDraft(drafts, alphaKey, {{repo: "Acme/One", title: "A", deviation: true}}, "request-a");
+drafts = captureAgentDraft(drafts, zetaKey, {{repo: "Acme/Two", title: "Z", deviation: false}}, "request-z");
 const alpha = restoreAgentDraft(drafts, alphaKey);
 alpha.repo = "changed";
+const checkbox = {{type: "checkbox", checked: true, value: "authorized"}};
+const checkboxDraft = agentDraftFieldValue(checkbox);
+restoreAgentDraftField(checkbox, false);
+const restoredUnchecked = checkbox.checked;
+restoreAgentDraftField(checkbox, true);
 process.stdout.write(JSON.stringify({{
   orderedBeforeMutation,
   sourceOrder,
@@ -429,6 +457,9 @@ process.stdout.write(JSON.stringify({{
   alpha: restoreAgentDraft(drafts, alphaKey),
   zeta: restoreAgentDraft(drafts, zetaKey),
   missing: restoreAgentDraft(drafts, JSON.stringify(["assign", "missingbot"])),
+  checkboxDraft,
+  restoredUnchecked,
+  restoredChecked: checkbox.checked,
   lockUrls: [
     partialAssignmentLockUrl({{url: "https://github.test/issue/1"}}),
     partialAssignmentLockUrl({{url: ""}}),
@@ -456,14 +487,19 @@ process.stdout.write(JSON.stringify({{
     assert out["alpha"] == {
         "repo": "Acme/One",
         "title": "A",
+        "deviation": True,
         "__requestId": "request-a",
     }
     assert out["zeta"] == {
         "repo": "Acme/Two",
         "title": "Z",
+        "deviation": False,
         "__requestId": "request-z",
     }
     assert out["missing"] == {}
+    assert out["checkboxDraft"] is True
+    assert out["restoredUnchecked"] is False
+    assert out["restoredChecked"] is True
     assert out["lockUrls"] == ["https://github.test/issue/1", None, None, None]
 
 

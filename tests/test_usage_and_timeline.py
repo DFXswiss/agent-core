@@ -10,19 +10,29 @@ from tests.conftest import sign_in
 from tests.test_newest_first import _insert_replica
 
 
-def test_usage_timeline_and_session_page_require_a_session(
+def test_usage_and_timeline_apis_require_a_session(
     agent_hub: TestClient,
 ) -> None:
     for path in (
         "/api/usage",
         "/api/session-timeline?id=missing",
         "/api/sessions/missing/timeline",
-        "/session?id=missing",
-        "/sessions/missing",
     ):
         response = agent_hub.get(path)
         assert response.status_code == 401
         assert response.json() == {"detail": "not signed in"}
+
+
+@pytest.mark.parametrize("path", ["/session?id=missing", "/sessions/missing"])
+def test_session_page_direct_entry_without_cookie_is_static_html(
+    agent_hub: TestClient, path: str
+) -> None:
+    response = agent_hub.get(path)
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert "session-timeline" in response.text
+    assert agent_hub.get("/api/session-timeline?id=missing").status_code == 401
 
 
 @pytest.mark.parametrize("session_id", ["..", "a/b", "x y"])
@@ -142,6 +152,50 @@ def test_usage_aggregates_lanes_openrouter_and_keeps_grok_shape(agent_hub: TestC
     assert body["grok"][0]["id"] == "grok-snapshot"
     assert body["grok"][0]["payload"]["used_percent"] == 12
     assert body["grok"][0]["_github_login"] == "helperbot"
+
+
+def test_usage_omits_all_sources_outside_a_self_only_viewer(agent_hub: TestClient) -> None:
+    for row_id, payload in (
+        (
+            "hidden-lane",
+            {
+                "id": "hidden-lane",
+                "type": "lane.run",
+                "session_id": "hidden-session",
+                "payload": {"vendor": "codex", "model": "hidden-model"},
+            },
+        ),
+        (
+            "hidden-openrouter",
+            {
+                "id": "hidden-openrouter",
+                "type": "usage.snapshot",
+                "payload": {"vendor": "openrouter", "account": "hidden-account"},
+            },
+        ),
+        (
+            "hidden-grok",
+            {
+                "id": "hidden-grok",
+                "type": "usage.snapshot",
+                "payload": {"vendor": "grok", "account_email": "hidden@example.test"},
+            },
+        ),
+    ):
+        _insert_replica(
+            agent_hub,
+            table="activity",
+            row_id=row_id,
+            updated_at="2026-11-05T10:00:00Z",
+            login="alice",
+            payload=payload,
+        )
+
+    sign_in(agent_hub, "code-dave")
+    response = agent_hub.get("/api/usage")
+
+    assert response.status_code == 200
+    assert response.json() == {"lanes": [], "accounts": [], "grok": []}
 
 
 def test_usage_arrays_are_newest_first_with_row_id_tiebreak(agent_hub: TestClient) -> None:
@@ -494,7 +548,7 @@ def test_timeline_order_relations_and_visibility(agent_hub: TestClient) -> None:
 
     sign_in(agent_hub, "code-dave")
     assert agent_hub.get("/api/sessions/timeline-session/timeline").status_code == 404
-    assert agent_hub.get("/sessions/timeline-session").status_code == 404
+    assert agent_hub.get("/sessions/timeline-session").status_code == 200
 
 
 def test_timeline_equal_times_sort_by_row_id_then_table(

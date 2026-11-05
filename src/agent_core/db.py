@@ -103,6 +103,7 @@ class Store:
             "actor TEXT, activity_type TEXT, request_id TEXT, status TEXT NOT NULL, "
             "lease_until TEXT NOT NULL, owner TEXT NOT NULL DEFAULT '', "
             "fingerprint TEXT NOT NULL DEFAULT '', prior_write INTEGER NOT NULL DEFAULT 0, "
+            "created_at TEXT NOT NULL DEFAULT '', "
             "PRIMARY KEY (actor, activity_type, request_id))"
         )
         columns = {
@@ -119,6 +120,10 @@ class Store:
         if "prior_write" not in columns:
             self._conn.execute(
                 "ALTER TABLE request_reservation ADD COLUMN prior_write INTEGER NOT NULL DEFAULT 0"
+            )
+        if "created_at" not in columns:
+            self._conn.execute(
+                "ALTER TABLE request_reservation ADD COLUMN created_at TEXT NOT NULL DEFAULT ''"
             )
 
     def close(self) -> None:
@@ -202,8 +207,8 @@ class Store:
                 if row is None:
                     self._conn.execute(
                         "INSERT INTO request_reservation "
-                        "(actor, activity_type, request_id, status, lease_until, owner, fingerprint) "
-                        "VALUES (?, ?, ?, 'pending', ?, ?, ?)",
+                        "(actor, activity_type, request_id, status, lease_until, owner, fingerprint, created_at) "
+                        "VALUES (?, ?, ?, 'pending', ?, ?, ?, ?)",
                         (
                             actor,
                             activity_type,
@@ -211,6 +216,7 @@ class Store:
                             lease_until,
                             owner,
                             fingerprint,
+                            now,
                         ),
                     )
                     result = "reserved"
@@ -232,6 +238,19 @@ class Store:
             except Exception:
                 self._conn.rollback()
                 raise
+
+    def request_created_at(
+        self, actor: str, activity_type: str, request_id: str, owner: str
+    ) -> str:
+        row = self.query_one(
+            "SELECT created_at FROM request_reservation "
+            "WHERE actor = ? AND activity_type = ? AND request_id = ? "
+            "AND status = 'pending' AND owner = ?",
+            (actor, activity_type, request_id, owner),
+        )
+        if row is None or not isinstance(row["created_at"], str):
+            return ""
+        return row["created_at"]
 
     def request_has_prior_write(
         self, actor: str, activity_type: str, request_id: str, owner: str

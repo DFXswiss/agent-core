@@ -611,11 +611,20 @@
       return values && typeof values === "object" ? { ...values } : {};
     }
 
+    function agentDraftFieldValue(field) {
+      return field.type === "checkbox" ? field.checked : field.value;
+    }
+
+    function restoreAgentDraftField(field, value) {
+      if (field.type === "checkbox") field.checked = value === true;
+      else field.value = value;
+    }
+
     function captureAgentDrafts() {
       let drafts = {};
       document.querySelectorAll("#agents-list .assign-form, #agents-list .reply-form").forEach(form => {
         const values = {};
-        form.querySelectorAll("input[name], textarea[name]").forEach(field => { values[field.name] = field.value; });
+        form.querySelectorAll("input[name], textarea[name]").forEach(field => { values[field.name] = agentDraftFieldValue(field); });
         drafts = captureAgentDraft(drafts, agentFormKey(form), values, form.dataset.requestId);
       });
       return drafts;
@@ -693,7 +702,7 @@
         const key = agentFormKey(form);
         const values = restoreAgentDraft(drafts, key);
         form.querySelectorAll("input[name], textarea[name]").forEach(field => {
-          if (Object.prototype.hasOwnProperty.call(values, field.name)) field.value = values[field.name];
+          if (Object.prototype.hasOwnProperty.call(values, field.name)) restoreAgentDraftField(field, values[field.name]);
         });
         if (values.__requestId) form.dataset.requestId = values.__requestId;
         if (agentFormsInFlight.has(key)) setFormBusy(form, true);
@@ -806,7 +815,9 @@
           <h4>Assign task</h4><form class="assign-form" data-agent="${esc(agent)}">
             <label>Repository <input name="repo" required placeholder="Owner/Name"></label>
             <label>Title <input name="title" required maxlength="256"></label>
-            <label>Body <textarea name="body" required maxlength="60000"></textarea></label><button type="submit">Assign</button>
+            <label>Body <textarea name="body" required maxlength="60000"></textarea></label>
+            <label><input type="checkbox" name="deviation" required> I authorize no deviation from the repository's contribution rules</label>
+            <button type="submit">Assign</button>
             <p class="assignment-failure" hidden></p>
           </form><h4>Assignments</h4>${assignments}</div>`;
       }).join("");
@@ -1109,8 +1120,20 @@
         if (agentFormsInFlight.has(formKey)) return;
         const sessionEpoch = agentSessionEpoch;
         const login = window.__login;
+        const deviation = form.querySelector('input[name="deviation"]');
+        if (!deviation || !deviation.checked) {
+          document.getElementById("action-err").hidden = false;
+          document.getElementById("action-err").textContent = "Authorize no deviation from the repository's contribution rules before assigning.";
+          return;
+        }
         const fd = new FormData(form);
-        const requestPayload = { agent: form.dataset.agent, repo: fd.get("repo"), title: fd.get("title"), body: fd.get("body") };
+        const requestPayload = {
+          agent: form.dataset.agent,
+          repo: fd.get("repo"),
+          title: fd.get("title"),
+          body: fd.get("body"),
+          deviation: { declared: false },
+        };
         const payloadJson = JSON.stringify(requestPayload);
         const pendingKey = pendingRequestKey(login, formKey);
         const pendingStorage = pendingRequestStorage();

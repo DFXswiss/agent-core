@@ -18,12 +18,18 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconn
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
-from pydantic import StrictStr
+from pydantic import BaseModel, ConfigDict, StrictStr
 from starlette.middleware.sessions import SessionMiddleware
 
 from .config import Config
 from .db import Store, dumps, loads, row_dict, utcnow
-from .github import GitHub, GitHubError, RealGitHub, valid_repository_name
+from .github import (
+    GITHUB_REQUEST_TIMEOUT,
+    GitHub,
+    GitHubError,
+    RealGitHub,
+    valid_repository_name,
+)
 from .teams import Roster, load_roster, visible_logins
 from .tokens import TokenError, issue, parse
 
@@ -59,6 +65,7 @@ ISSUE_CACHE_SECONDS = 60
 ISSUE_CACHE_MAX_ENTRIES = 500
 ASSIGNMENT_ENRICHMENT_LIMIT = 50
 ASSIGNMENT_ENRICHMENT_SECONDS = 10.0
+ASSIGNMENT_RECOVERY_SECONDS = 10.0
 REQUEST_LEASE_SECONDS = 120
 GITHUB_REAUTH_DETAIL = "sign in on the website again"
 GITHUB_TOKEN_REQUIRED_DETAIL = "sign in on the website once so the hub holds your GitHub token"
@@ -66,6 +73,10 @@ REQUEST_FINGERPRINT_CONFLICT_DETAIL = (
     "request id was used for different content; reload the assignment list"
 )
 REQUEST_ALREADY_COMPLETED_DETAIL = "request already completed; reload the assignment list"
+DEVIATION_REQUIRED_DETAIL = (
+    'deviation must be {"declared": false}; a deviation needs an explicit grant on the issue'
+)
+RESERVED_REQUEST_MARKER_DETAIL = "body contains a reserved agent-core request marker line"
 REQUEST_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 HUB_AUTHORED_ACTIVITY_TYPES = frozenset({"assignment.created", "assignment.reply"})
 ASSIGNMENT_WRITE_ROUTES = frozenset(
@@ -75,6 +86,17 @@ ASSIGNMENT_WRITE_ROUTES = frozenset(
     }
 )
 _MISSING = object()
+
+
+class AssignmentCreateBody(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    agent: StrictStr | None = None
+    repo: StrictStr | None = None
+    title: StrictStr | None = None
+    body: StrictStr | None = None
+    request_id: StrictStr | None = None
+    deviation: Any = None
 
 
 class Hub:
@@ -393,21 +415,19 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
     def index() -> HTMLResponse:
         return _dashboard_html()
 
-    def _session_page_response(request: Request, session_id: str) -> HTMLResponse:
-        login = hub.session_login(request)
-        _visible_session_row(hub, login, session_id)
+    def _session_page_response() -> HTMLResponse:
         page = STATIC / "session.html"
         if not page.is_file():
             raise HTTPException(status_code=500, detail="session page is missing")
         return HTMLResponse(page.read_text(encoding="utf-8"))
 
     @app.api_route("/session", methods=["GET", "HEAD"])
-    def session_page_query(request: Request, id: str) -> HTMLResponse:
-        return _session_page_response(request, id)
+    def session_page_query(id: str) -> HTMLResponse:
+        return _session_page_response()
 
     @app.api_route("/sessions/{session_id}", methods=["GET", "HEAD"])
-    def session_page(request: Request, session_id: str) -> HTMLResponse:
-        return _session_page_response(request, session_id)
+    def session_page(session_id: str) -> HTMLResponse:
+        return _session_page_response()
 
     @app.api_route("/favicon.ico", methods=["GET", "HEAD"])
     def favicon_ico() -> FileResponse:
@@ -533,12 +553,14 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
 
     @app.post("/api/assignments")
     async def api_assignment_create(
-        request: Request, body: dict[str, StrictStr | None]
+        request: Request, request_body: AssignmentCreateBody
     ):
+        body = request_body.model_dump(exclude_unset=True)
         _prepare_request_id_error_state(request, body)
         actor, device_actor = _request_actor(hub, request)
         if device_actor and hub.roster.is_agent(actor):
             raise HTTPException(status_code=403, detail="an agent device cannot create assignments")
+        deviation = _require_no_deviation(body)
         agent = _require_str(body, "agent").lower()
         if not hub.roster.is_agent(agent):
             raise HTTPException(status_code=404, detail="unknown agent")
@@ -549,11 +571,20 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
             raise HTTPException(status_code=400, detail="repo must be Owner/Name")
         title = _bounded_body_string(body, "title", 1, 256)
         issue_body = _bounded_body_string(body, "body", 1, 60000)
+        _reject_reserved_request_marker(issue_body)
         request_id = _optional_request_id(body)
         request_fingerprint = _request_fingerprint(
-            {"repo": repo.casefold(), "title": title, "body": issue_body, "agent": agent}
+            {
+                "repo": repo.casefold(),
+                "title": title,
+                "body": issue_body,
+                "agent": agent,
+                "deviation": deviation,
+            }
         )
         request_owner = uuid.uuid4().hex
+        recovering_request = False
+        recovery_since = ""
         if request_id is not None:
             now, lease_until = _request_lease_times()
             reservation = hub.store.reserve_request(
@@ -565,13 +596,17 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                 now,
                 lease_until,
             )
-            if (
+            recovering_request = (
                 reservation in ("reserved", "taken_over")
                 and hub.store.request_has_prior_write(
                     actor, "assignment.created", request_id, request_owner
                 )
-            ):
+            )
+            if recovering_request:
                 request.state.request_id_prior_write = True
+                recovery_since = hub.store.request_created_at(
+                    actor, "assignment.created", request_id, request_owner
+                )
             if reservation == "conflict":
                 raise HTTPException(
                     status_code=409,
@@ -609,15 +644,28 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         try:
             token = _github_token(hub, actor)
             created = None
-            if request_id is not None:
+            if request_id is not None and recovering_request:
+                recovery_deadline = time.monotonic() + ASSIGNMENT_RECOVERY_SECONDS
+
+                def matches_recovery(row: dict[str, Any]) -> bool:
+                    return _recovered_body_matches(
+                        row, actor, posted_body, request_id
+                    )
+
                 recent = await asyncio.to_thread(
-                    hub.github.recent_issues_by_creator, token, repo, actor
+                    hub.github.recent_issues_by_creator,
+                    token,
+                    repo,
+                    actor,
+                    _github_read_timeout(recovery_deadline),
+                    recovery_since,
+                    matches_recovery,
                 )
                 created = next(
                     (
                         issue_row
                         for issue_row in recent
-                        if _contains_request_marker(issue_row.get("body"), request_id)
+                        if matches_recovery(issue_row)
                     ),
                     None,
                 )
@@ -724,6 +772,14 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                     _request_id_error_content(request, 409, reauth_failure),
                     status_code=409,
                 )
+            if request_id is not None and recovering_request and not issue_created:
+                hub.store.expire_request(
+                    actor, "assignment.created", request_id, request_owner
+                )
+                raise HTTPException(
+                    status_code=409,
+                    detail="request is still in progress; retry shortly",
+                ) from exc
             if issue_created:
                 failure: dict[str, Any] = {"detail": _bounded_github_error(exc)}
                 if url:
@@ -759,6 +815,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                 "url": stored_url,
                 "title": title,
                 "actor": actor,
+                "deviation": {"declared": False, "stated_by": actor},
             },
         }
         if request_id is not None:
@@ -877,6 +934,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         if not valid_repository_name(repo) or number < 1:
             raise HTTPException(status_code=404, detail="unknown issue")
         comment_body = _bounded_body_string(body, "body", 1, 60000)
+        _reject_reserved_request_marker(comment_body)
         request_id = _optional_request_id(body)
         request_fingerprint = _request_fingerprint(
             {
@@ -887,6 +945,8 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
             }
         )
         request_owner = uuid.uuid4().hex
+        recovering_request = False
+        recovery_since = ""
         if request_id is not None:
             now, lease_until = _request_lease_times()
             reservation = hub.store.reserve_request(
@@ -898,13 +958,17 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                 now,
                 lease_until,
             )
-            if (
+            recovering_request = (
                 reservation in ("reserved", "taken_over")
                 and hub.store.request_has_prior_write(
                     actor, "assignment.reply", request_id, request_owner
                 )
-            ):
+            )
+            if recovering_request:
                 request.state.request_id_prior_write = True
+                recovery_since = hub.store.request_created_at(
+                    actor, "assignment.reply", request_id, request_owner
+                )
             if reservation == "conflict":
                 raise HTTPException(
                     status_code=409,
@@ -955,14 +1019,27 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
             if not owned_assigned:
                 raise HTTPException(status_code=403, detail="not an owner of an agent assigned to this issue")
             comment = None
-            if request_id is not None:
-                comments = await asyncio.to_thread(hub.github.issue_comments, token, repo, number)
+            if request_id is not None and recovering_request:
+                recovery_deadline = time.monotonic() + ASSIGNMENT_RECOVERY_SECONDS
+
+                def matches_recovery(row: dict[str, Any]) -> bool:
+                    return _recovered_body_matches(
+                        row, actor, posted_body, request_id
+                    )
+
+                comments = await asyncio.to_thread(
+                    hub.github.issue_comments,
+                    token,
+                    repo,
+                    number,
+                    _github_read_timeout(recovery_deadline),
+                    recovery_since,
+                    matches_recovery,
+                )
                 comment = next(
                     (
-                        row
-                        for row in reversed(comments)
-                        if _comment_author(row) == actor
-                        and _contains_request_marker(row.get("body"), request_id)
+                        row for row in comments
+                        if matches_recovery(row)
                     ),
                     None,
                 )
@@ -1023,6 +1100,14 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                             actor, "assignment.reply", request_id, request_owner
                         )
                 raise HTTPException(status_code=409, detail=GITHUB_REAUTH_DETAIL) from exc
+            if request_id is not None and recovering_request and not comment_write_started:
+                hub.store.expire_request(
+                    actor, "assignment.reply", request_id, request_owner
+                )
+                raise HTTPException(
+                    status_code=409,
+                    detail="request is still in progress; retry shortly",
+                ) from exc
             if (
                 request_id is not None
                 and not getattr(request.state, "request_id_prior_write", False)
@@ -1577,6 +1662,25 @@ def _bounded_body_string(body: dict[str, Any], key: str, minimum: int, maximum: 
     return value
 
 
+def _reject_reserved_request_marker(body: str) -> None:
+    if any(
+        line.strip().startswith("<!-- agent-core-request:")
+        for line in body.splitlines()
+    ):
+        raise HTTPException(status_code=400, detail=RESERVED_REQUEST_MARKER_DETAIL)
+
+
+def _require_no_deviation(body: dict[str, Any]) -> dict[str, bool]:
+    value = body.get("deviation")
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"declared"}
+        or value.get("declared") is not False
+    ):
+        raise HTTPException(status_code=400, detail=DEVIATION_REQUIRED_DETAIL)
+    return {"declared": False}
+
+
 def _optional_request_id(body: dict[str, Any]) -> str | None:
     if "request_id" not in body:
         return None
@@ -1674,8 +1778,13 @@ def _request_marker(request_id: str) -> str:
     return f"<!-- agent-core-request:{request_id} -->"
 
 
-def _contains_request_marker(body: Any, request_id: str) -> bool:
-    return isinstance(body, str) and _request_marker(request_id) in body.splitlines()
+def _body_without_request_marker(body: Any, request_id: str) -> str | None:
+    if not isinstance(body, str):
+        return None
+    suffix = "\n\n" + _request_marker(request_id)
+    if not body.endswith(suffix):
+        return None
+    return body[: -len(suffix)]
 
 
 def _comment_author(comment: dict[str, Any]) -> str:
@@ -1684,6 +1793,23 @@ def _comment_author(comment: dict[str, Any]) -> str:
         return ""
     login = user.get("login")
     return login.strip().lower() if isinstance(login, str) else ""
+
+
+def _recovered_body_matches(
+    row: dict[str, Any], actor: str, expected_body: str, request_id: str
+) -> bool:
+    return (
+        _comment_author(row) == actor
+        and _body_without_request_marker(row.get("body"), request_id)
+        == _body_without_request_marker(expected_body, request_id)
+    )
+
+
+def _github_read_timeout(deadline: float) -> float:
+    return min(
+        GITHUB_REQUEST_TIMEOUT,
+        max(0.0, deadline - time.monotonic()),
+    )
 
 
 def _assignment_request_replay(
@@ -1800,10 +1926,18 @@ def _assignment_enrichment(
     if time.monotonic() >= deadline:
         return {"enriched": False}
     try:
-        issue_row = hub.github.issue(token, repo, number)
+        issue_timeout = _github_read_timeout(deadline)
+        if issue_timeout <= 0:
+            return {"enriched": False}
+        issue_row = hub.github.issue(token, repo, number, issue_timeout)
+        comments_timeout = _github_read_timeout(deadline)
+        if comments_timeout <= 0:
+            return {"enriched": False}
+        raw_comments = hub.github.issue_comments(
+            token, repo, number, comments_timeout
+        )
         if time.monotonic() >= deadline:
             return {"enriched": False}
-        raw_comments = hub.github.issue_comments(token, repo, number)
     except GitHubError as exc:
         if exc.status_code in (None, 401):
             raise
@@ -1824,6 +1958,7 @@ def _assignment_enrichment(
         url = raw.get("html_url") if isinstance(raw.get("html_url"), str) else ""
         comments.append(
             {
+                "_id": _comment_id(raw),
                 "author": author if isinstance(author, str) else "",
                 "created_at": created_at,
                 "updated_at": updated_at,
@@ -1831,10 +1966,11 @@ def _assignment_enrichment(
                 "url": url,
             }
         )
-    # GitHub returns comments oldest first. Reversing first makes the stable sort
-    # put the later GitHub comment first among equal timestamps.
-    comments.reverse()
-    comments.sort(key=lambda row: row["updated_at"], reverse=True)
+    comments.sort(
+        key=lambda row: (row["updated_at"], row["_id"]), reverse=True
+    )
+    for comment in comments:
+        comment.pop("_id", None)
     result = {
         "enriched": True,
         "state": issue_row.get("state") if isinstance(issue_row.get("state"), str) else "",
@@ -1843,6 +1979,11 @@ def _assignment_enrichment(
     }
     hub.issue_cache[key] = (time.monotonic() + ISSUE_CACHE_SECONDS, result)
     return dict(result)
+
+
+def _comment_id(comment: dict[str, Any]) -> int:
+    value = comment.get("id")
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
 def _prune_issue_cache(hub: Hub) -> None:

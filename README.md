@@ -70,7 +70,7 @@ Anyone who can see a session may watch its live terminal on the website. Start, 
 The dashboard shows an **Agents** section to people who own at least one configured agent. It links agent sessions to their chronological timelines, shows current coordinator state, creates assignments, displays issue questions, and posts owner replies. Assignment creation responses and stored activity use GitHub's canonical repository case. Usage is available in lane-token, OpenRouter-account, and Grok tables.
 
 Session timelines keep the newest 5,000 related rows when capped and return those rows in chronological order (oldest first) with `truncated: true`.
-If the timeline page's timeline fetch returns 401, the page shows **Signed out — sign in on the dashboard** and links back to `/`; the page does not poll.
+The static session page is served on direct entry without a sign-in cookie. If its timeline fetch returns 401, the page shows **Signed out — sign in on the dashboard** and links back to `/`; the page does not poll or expose session data.
 
 Website API endpoints are documented in [PROTOCOL.md](PROTOCOL.md):
 
@@ -81,7 +81,9 @@ Website API endpoints are documented in [PROTOCOL.md](PROTOCOL.md):
 
 The hub uses only the signed-in human's stored OAuth token for GitHub issue and comment writes. Tokens never enter API responses, activity rows, or browser cookies. Devices remain the sole write owners of their rows; website actions use synthetic `web:<login>` activity origins.
 
-Assignment and reply writes accept an optional lowercase UUID `request_id`. The dashboard keeps the same UUID and exact request payload in `sessionStorage` across reloads and sign-in renewal after a timeout or network error, and the hub appends `<!-- agent-core-request:<request_id> -->` to the GitHub issue or comment. The hub binds the id to a fingerprint of the normalized request and reserves each actor, activity type, and request id while the write is in progress; a concurrent request returns 409, as does reuse with different content. A later retry reuses the recorded or marker-matched GitHub write and returns 200 when the matching activity was already recorded, preventing duplicate issues and comments after an ambiguous timeout. Recording the activity and completing its reservation are one transaction, so a superseded lease owner cannot publish a second event.
+Every assignment creation must include `deviation: {"declared": false}`. This is the assigning owner's explicit statement that no deviation from the target repository's contribution rules is authorized; any deviation instead needs an explicit grant on the issue. The dashboard requires the owner to actively check this statement for each assignment.
+
+Assignment and reply writes accept an optional lowercase UUID `request_id`. User bodies cannot contain the reserved `<!-- agent-core-request:` marker line. The dashboard keeps the same UUID and exact request payload in `sessionStorage` across reloads and sign-in renewal after a timeout or network error, and the hub appends `<!-- agent-core-request:<request_id> -->` to the GitHub issue or comment. The hub binds the id to a fingerprint of the normalized request and reserves each actor, activity type, and request id while the write is in progress; a concurrent request returns 409, as does reuse with different content. A later retry searches back to the reservation's first-reserve time and reuses only an actor-authored marker match with the expected marker-free body, preventing duplicate issues and comments after an ambiguous timeout. Recording the activity and completing its reservation are one transaction, so a superseded lease owner cannot publish a second event.
 
 ## Tests
 
