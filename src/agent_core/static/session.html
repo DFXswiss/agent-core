@@ -25,6 +25,14 @@
     function esc(value) {
       return String(value ?? "").replace(/[&<>"]/g, char => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[char]));
     }
+    function safeHref(url) {
+      try {
+        const parsed = new URL(url);
+        return parsed.protocol === "https:" && parsed.host === "github.com" ? parsed.href : null;
+      } catch (e) {
+        return null;
+      }
+    }
     const parts = location.pathname.split("/").filter(Boolean);
     const sessionId = decodeURIComponent(parts[parts.length - 1] || "");
     document.getElementById("session-id").textContent = sessionId;
@@ -60,7 +68,8 @@
       }
       if (payload.type === "assignment.created" || payload.type === "assignment.reply") {
         const label = `${inner.repo || "issue"}${inner.number ? "#" + inner.number : ""}`;
-        return inner.url ? `<a href="${esc(inner.url)}" target="_blank" rel="noopener">${esc(label)}</a> — ${esc(payload.type)}` : esc(payload.type);
+        const href = safeHref(inner.url);
+        return `${href ? `<a href="${esc(href)}" target="_blank" rel="noopener">${esc(label)}</a>` : esc(label)} — ${esc(payload.type)}`;
       }
       return `<code>${esc(JSON.stringify(payload))}</code>`;
     }

@@ -57,6 +57,8 @@ Rules:
 
 An `activity` insert with `payload.type=message` must set `payload.payload.to_session` to the recipient **session id**. The hub resolves that id against the replica.
 
+`activity` rows with `payload.type=assignment.created` or `assignment.reply` are hub-authored only. A device push using either type is refused with 400; devices cannot manufacture assignment links or replies.
+
 - Missing target session → 404.
 - Sender is not allowed to see the owning login of that session → 403.
 - Open session ids are unique; the hub uses that uniqueness to route the snapshot.
@@ -287,7 +289,7 @@ The actor must own the agent. A bearer belonging to an agent is refused. Reposit
 {"repo":"Owner/Name","number":42,"url":"https://github.com/Owner/Name/issues/42","agent":"agent-login","actor":"owner-login"}
 ```
 
-Creation records an `activity` replica with type `assignment.created`; replies record `assignment.reply`. Both payloads include `issue_key` as `<canonical Owner/Name>#<number>`, use `web:<actor>` origins, and contain no OAuth token. Agents look up mandates with `POST /sync/query` by matching both `type` and `payload.issue_key`, for example:
+Creation records an `activity` replica with type `assignment.created`; replies record `assignment.reply`. Both payloads include `issue_key` as `<canonical Owner/Name>#<number>`, use `web:<actor>` origins, and contain no OAuth token. Their stored URL is canonicalized to `https://github.com/<owner>/<repo>/issues/<number>`; a reply may retain a valid `#issuecomment-<number>` fragment. `GET /api/assignments` accepts only `assignment.created` rows whose replica login matches both the `web:<login>` origin and the inner `actor`. Agents look up mandates with `POST /sync/query` by matching both `type` and `payload.issue_key`, for example:
 
 ```json
 {"match":{"type":"assignment.created","payload.issue_key":"Owner/Name#42"}}
@@ -307,4 +309,4 @@ GitHub transport errors return bounded 502 messages.
 
 ### Session timeline
 
-`GET /api/sessions/{id}/timeline` returns 404 unless the session is visible. It includes the session, its activities and tasks, and task/session-related `task_round`, `agent`, `checklist_item`, `local_check`, and `review_gate` replicas. Each row has `table`, `row_id`, `at`, and `payload`; `at` prefers `created_at`, `started_at`, `ran_at`, or `recorded_at` and otherwise uses replica `updated_at`. When more than 5,000 rows match, it keeps the newest 5,000 rows and sets `truncated` to true. Unlike every dashboard list, the returned timeline remains oldest first. `GET /sessions/{id}` renders lane runs and tool calls, coordinator task phase and blocker information, checks and gates, and assignment links.
+`GET /api/sessions/{id}/timeline` returns 404 unless the session is visible. It includes the session, its activities and tasks, and task/session-related `task_round`, `agent`, `checklist_item`, `local_check`, and `review_gate` replicas. Each row has `table`, `row_id`, `at`, and `payload`; `at` prefers `created_at`, `started_at`, `ran_at`, or `recorded_at` and otherwise uses replica `updated_at`. When more than 5,000 rows match, it keeps the newest 5,000 rows and sets `truncated` to true; the oldest rows are dropped, normally including the session row. Unlike every dashboard list, the returned timeline remains oldest first. `GET /sessions/{id}` renders lane runs and tool calls, coordinator task phase and blocker information, checks and gates, and assignment links.

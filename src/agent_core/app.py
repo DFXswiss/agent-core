@@ -9,6 +9,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
@@ -50,6 +51,7 @@ QUERY_ROW_CAP = 500
 TIMELINE_ROW_CAP = 5000
 ISSUE_CACHE_SECONDS = 60
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+HUB_AUTHORED_ACTIVITY_TYPES = frozenset({"assignment.created", "assignment.reply"})
 _MISSING = object()
 
 
@@ -529,6 +531,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
             raise HTTPException(status_code=502, detail=_bounded_github_error(exc)) from exc
         if number is None:
             raise HTTPException(status_code=502, detail="GitHub issue creation returned no issue number")
+        stored_url = _stored_github_issue_url(repo, number, url)
         activity_id = str(uuid.uuid4())
         event_payload = {
             "id": activity_id,
@@ -539,7 +542,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                 "repo": repo,
                 "issue_key": f"{repo}#{number}",
                 "number": number,
-                "url": url,
+                "url": stored_url,
                 "title": title,
                 "actor": actor,
             },
@@ -567,11 +570,18 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         )
         assignments: list[dict[str, Any]] = []
         for row in rows:
+            row_login = row["github_login"]
+            if not isinstance(row_login, str) or row["origin_device_id"] != f"web:{row_login}":
+                continue
             payload = loads(row["payload"])
             if not isinstance(payload, dict) or payload.get("type") != "assignment.created":
                 continue
             inner = payload.get("payload")
-            if not isinstance(inner, dict) or str(inner.get("agent", "")).lower() != wanted:
+            if (
+                not isinstance(inner, dict)
+                or inner.get("actor") != row_login
+                or str(inner.get("agent", "")).lower() != wanted
+            ):
                 continue
             item = dict(inner)
             repo = item.get("repo")
@@ -611,6 +621,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         url = comment.get("html_url")
         if not isinstance(url, str) or not url:
             url = str(issue_row.get("html_url") or "")
+        stored_url = _stored_github_issue_url(repo, number, url)
         activity_id = str(uuid.uuid4())
         event_payload = {
             "id": activity_id,
@@ -621,7 +632,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                 "repo": repo,
                 "issue_key": f"{repo}#{number}",
                 "number": number,
-                "url": url,
+                "url": stored_url,
                 "actor": actor,
                 "body": comment_body,
             },
@@ -1092,6 +1103,26 @@ def _issue_repository_name(issue_row: dict[str, Any]) -> str | None:
     return repo if REPO_RE.fullmatch(repo) is not None else None
 
 
+def _stored_github_issue_url(repo: str, number: int, candidate: str = "") -> str:
+    """Return a canonical GitHub issue URL, preserving only a valid comment fragment."""
+    base = f"https://github.com/{repo}/issues/{number}"
+    if not isinstance(candidate, str) or candidate == "":
+        return base
+    try:
+        parsed = urlsplit(candidate)
+    except ValueError:
+        return base
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc != "github.com"
+        or parsed.path != f"/{repo}/issues/{number}"
+        or parsed.query
+        or re.fullmatch(r"issuecomment-[0-9]+", parsed.fragment or "") is None
+    ):
+        return base
+    return f"{base}#{parsed.fragment}"
+
+
 def _issue_assignees(issue_row: dict[str, Any]) -> set[str]:
     raw = issue_row.get("assignees")
     if not isinstance(raw, list):
@@ -1127,11 +1158,13 @@ def _assignment_enrichment(
         author = user.get("login") if isinstance(user, dict) else ""
         body = raw.get("body") if isinstance(raw.get("body"), str) else ""
         created_at = raw.get("created_at") if isinstance(raw.get("created_at"), str) else ""
+        url = raw.get("html_url") if isinstance(raw.get("html_url"), str) else ""
         comments.append(
             {
                 "author": author if isinstance(author, str) else "",
                 "created_at": created_at,
                 "body": body[:4000],
+                "url": url,
             }
         )
     comments.sort(key=lambda row: row["created_at"], reverse=True)
@@ -1597,6 +1630,8 @@ def _accept_event(
         raise HTTPException(status_code=400, detail="origin_seq must be a positive integer")
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="payload must be an object")
+    if table == "activity" and payload.get("type") in HUB_AUTHORED_ACTIVITY_TYPES:
+        raise HTTPException(status_code=400, detail="assignment activity is hub-authored only")
     if not isinstance(occurred, str) or occurred == "":
         raise HTTPException(status_code=400, detail="occurred_at is required")
     existing = hub.store.query_one(

@@ -54,6 +54,14 @@ def test_pair_as_agent_authorization(agent_hub: TestClient) -> None:
         assert response.status_code == expected
 
 
+def test_auth_me_lists_owned_agents_only_for_owner(agent_hub: TestClient) -> None:
+    sign_in(agent_hub, "code-alice")
+    assert agent_hub.get("/auth/me").json()["owned_agents"] == ["helperbot"]
+
+    sign_in(agent_hub, "code-bob")
+    assert agent_hub.get("/auth/me").json()["owned_agents"] == []
+
+
 def test_owner_controls_agent_session_including_owner_device_bearer(agent_hub: TestClient) -> None:
     agent_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaab05"
     owner_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaab06"

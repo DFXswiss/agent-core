@@ -104,6 +104,71 @@ def test_usage_aggregates_lanes_openrouter_and_keeps_grok_shape(agent_hub: TestC
     assert body["grok"][0]["_github_login"] == "helperbot"
 
 
+def test_usage_arrays_are_newest_first_with_row_id_tiebreak(agent_hub: TestClient) -> None:
+    sign_in(agent_hub, "code-alice")
+    for suffix, updated_at in (
+        ("old", "2026-11-04T08:00:00Z"),
+        ("tie-a", "2026-11-04T09:00:00Z"),
+        ("tie-b", "2026-11-04T09:00:00Z"),
+    ):
+        _insert_replica(
+            agent_hub,
+            table="activity",
+            row_id=f"lane-{suffix}",
+            updated_at=updated_at,
+            login="helperbot",
+            payload={
+                "id": f"lane-{suffix}",
+                "type": "lane.run",
+                "session_id": f"session-{suffix}",
+                "payload": {"vendor": "anthropic", "model": "model-a"},
+            },
+        )
+        _insert_replica(
+            agent_hub,
+            table="activity",
+            row_id=f"openrouter-{suffix}",
+            updated_at=updated_at,
+            login="helperbot",
+            payload={
+                "id": f"openrouter-{suffix}",
+                "type": "usage.snapshot",
+                "payload": {"vendor": "openrouter", "account": f"account-{suffix}"},
+            },
+        )
+        _insert_replica(
+            agent_hub,
+            table="activity",
+            row_id=f"grok-{suffix}",
+            updated_at=updated_at,
+            login="helperbot",
+            payload={
+                "id": f"grok-{suffix}",
+                "type": "usage.snapshot",
+                "payload": {"vendor": "grok", "account_email": f"{suffix}@example.test"},
+            },
+        )
+
+    response = agent_hub.get("/api/usage")
+    assert response.status_code == 200
+    body = response.json()
+    assert [row["session_id"] for row in body["lanes"]] == [
+        "session-tie-b",
+        "session-tie-a",
+        "session-old",
+    ]
+    assert [row["account"] for row in body["accounts"]] == [
+        "account-tie-b",
+        "account-tie-a",
+        "account-old",
+    ]
+    assert [row["id"] for row in body["grok"]] == [
+        "grok-tie-b",
+        "grok-tie-a",
+        "grok-old",
+    ]
+
+
 def test_timeline_order_relations_and_visibility(agent_hub: TestClient) -> None:
     sign_in(agent_hub, "code-alice")
     _insert_replica(
@@ -201,3 +266,4 @@ def test_timeline_truncates_at_5000(agent_hub: TestClient) -> None:
     assert len(body["timeline"]) == 5000
     assert body["timeline"][0]["row_id"] == "long-activity-0001"
     assert body["timeline"][-1]["row_id"] == "long-activity-5000"
+    assert all(row["table"] != "session" for row in body["timeline"])

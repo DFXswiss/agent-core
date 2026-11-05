@@ -321,7 +321,13 @@ def test_index_agent_render_preserves_forms_and_handles_fetch_lifecycle() -> Non
     ].split('form.classList.contains("reply-form")', 1)[0]
     reply_handler = submit_handler.split('form.classList.contains("reply-form")', 1)[1]
     abort_fn = html.split("function abortHubFetches()", 1)[1].split(
-        "function clearHubTables()", 1
+        "function abortAssignmentLoads()", 1
+    )[0]
+    assignment_abort_fn = html.split("function abortAssignmentLoads()", 1)[1].split(
+        "function expireAssignmentLoad", 1
+    )[0]
+    assignment_load_fn = html.split("function loadAssignmentsForAgent", 1)[1].split(
+        "async function renderAgents", 1
     )[0]
     clear_fn = html.split("function clearHubTables()", 1)[1].split("function jsonGet", 1)[0]
 
@@ -329,24 +335,30 @@ def test_index_agent_render_preserves_forms_and_handles_fetch_lifecycle() -> Non
     assert "captureAgentDrafts()" in render_agents
     assert "restoreAgentFormState(drafts)" in render_agents
     assert "Could not load assignments:" in render_agents
-    assert "try { body = await res.json(); } catch" in render_agents
+    assert "try { body = await res.json(); } catch" in assignment_load_fn
     assert "No assignments." in render_agents
-    assert "new AbortController()" in render_agents
-    assert "signal: ctl.signal" in render_agents
-    assert "assignmentControllers.forEach(ctl => ctl.abort())" in render_agents
-    assert render_agents.index("assignmentControllers.forEach(ctl => ctl.abort())") < render_agents.index(
-        'fetch("/api/assignments?agent="'
-    )
+    assert "Promise.all(owned.map(loadAssignmentsForAgent))" in render_agents
+    assert "new AbortController()" not in render_agents
+    assert "abortAssignmentLoads()" not in render_agents
+    assert "const assignmentLoads = new Map()" in html
+    assert "const ASSIGNMENT_REFRESH_MS = 15000" in html
+    assert "const current = assignmentLoads.get(agent)" in assignment_load_fn
+    assert "if (current) return current.promise" in assignment_load_fn
+    assert "now - completedAt < ASSIGNMENT_REFRESH_MS" in assignment_load_fn
+    assert "new AbortController()" in assignment_load_fn
+    assert "signal: controller.signal" in assignment_load_fn
     assert "captureAgentFocus()" in render_agents
     assert "restoreAgentFocus(focus)" in render_agents
     assert "selectionStart" in html
     assert "selectionEnd" in html
     assert "setSelectionRange" in html
-    assert "assignmentControllers.forEach(ctl => ctl.abort())" in abort_fn
-    assert "++agentRenderGen" in abort_fn
-    assert abort_fn.index("assignmentControllers.forEach(ctl => ctl.abort())") < abort_fn.index(
-        "++agentRenderGen"
-    )
+    assert "assignmentLoads" not in abort_fn
+    assert "assignmentLoads.forEach(load => load.controller.abort())" in assignment_abort_fn
+    assert "assignmentLoads.clear()" in assignment_abort_fn
+    assert "++agentRenderGen" in assignment_abort_fn
+    assert html.count("abortAssignmentLoads();") == 3
+    assert "assignmentOwnerSetKey(user.owned_agents || [])" in html
+    assert "assignmentOwnersKey !== nextOwnerKey" in html
     assert "++agentRenderGen" in clear_fn
     assert "++agentSessionEpoch" in clear_fn
     assert html.count("++agentSessionEpoch") == 1

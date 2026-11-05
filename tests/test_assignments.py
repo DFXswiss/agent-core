@@ -7,6 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import agent_core.app as app_module
+from agent_core.db import dumps
 from agent_core.github import FakeGitHub, RealGitHub
 from tests.conftest import pair_device, sign_in
 from tests.test_agent_pair_control import _pair_as
@@ -51,6 +52,7 @@ def test_owner_creates_assignment_and_web_activity(agent_hub: TestClient) -> Non
     assert activity["payload"]["agent"] == "helperbot"
     assert activity["payload"]["actor"] == "alice"
     assert activity["payload"]["issue_key"] == "Acme/Widget#1"
+    assert activity["payload"]["url"] == "https://github.com/Acme/Widget/issues/1"
     replica = agent_hub.app.state.hub.store.query_one(
         "SELECT origin_device_id FROM row_replica WHERE table_name = 'activity' AND row_id = ?",
         (activity["id"],),
@@ -243,6 +245,7 @@ def test_assignment_list_comments_and_reply_authorization(agent_hub: TestClient)
     state = agent_hub.get("/api/state").json()
     reply = next(row for row in state["activity"] if row.get("type") == "assignment.reply")
     assert reply["payload"]["issue_key"] == "Acme/Widget#1"
+    assert reply["payload"]["url"] == "https://github.com/Acme/Widget/issues/1"
     replica = agent_hub.app.state.hub.store.query_one(
         "SELECT origin_device_id FROM row_replica WHERE table_name = 'activity' AND row_id = ?",
         (reply["id"],),
@@ -254,6 +257,84 @@ def test_assignment_list_comments_and_reply_authorization(agent_hub: TestClient)
         "/api/assignments/Acme/Widget/1/comments", json={"body": "I do not own this agent."}
     )
     assert denied.status_code == 403
+
+
+def test_device_cannot_push_hub_authored_assignment_activity(agent_hub: TestClient) -> None:
+    device_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaac04"
+    token = pair_device(agent_hub, "code-alice", device_id)
+    pushed = agent_hub.post(
+        "/sync/push",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "events": [
+                {
+                    "origin_device_id": device_id,
+                    "origin_seq": 1,
+                    "table": "activity",
+                    "op": "insert",
+                    "row_id": "forged-assignment",
+                    "payload": {
+                        "id": "forged-assignment",
+                        "type": "assignment.created",
+                        "payload": {
+                            "agent": "helperbot",
+                            "actor": "alice",
+                            "url": "javascript:alert(1)",
+                        },
+                    },
+                    "occurred_at": "2026-11-05T10:00:00Z",
+                }
+            ]
+        },
+    )
+    assert pushed.status_code == 400
+    assert pushed.json()["detail"] == "assignment activity is hub-authored only"
+    assert (
+        agent_hub.app.state.hub.store.query_one(
+            "SELECT row_id FROM row_replica WHERE table_name = 'activity' AND row_id = ?",
+            ("forged-assignment",),
+        )
+        is None
+    )
+
+
+def test_assignment_list_ignores_non_web_and_actor_mismatched_rows(agent_hub: TestClient) -> None:
+    sign_in(agent_hub, "code-alice")
+    store = agent_hub.app.state.hub.store
+    for row_id, origin, actor in (
+        ("trusted-assignment", "web:alice", "alice"),
+        ("device-assignment", "device-alice", "alice"),
+        ("mismatched-assignment", "web:alice", "bob"),
+    ):
+        store.execute(
+            "INSERT INTO row_replica (table_name, row_id, origin_device_id, github_login, payload, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "activity",
+                row_id,
+                origin,
+                "alice",
+                dumps(
+                    {
+                        "id": row_id,
+                        "type": "assignment.created",
+                        "payload": {
+                            "agent": "helperbot",
+                            "actor": actor,
+                            "repo": "Acme/Widget",
+                            "number": 99,
+                            "title": row_id,
+                            "url": "javascript:alert(1)",
+                        },
+                    }
+                ),
+                "2026-11-05T10:00:00Z",
+            ),
+        )
+
+    listed = agent_hub.get("/api/assignments", params={"agent": "helperbot"})
+    assert listed.status_code == 200
+    assert [row["title"] for row in listed.json()["assignments"]] == ["trusted-assignment"]
 
 
 def test_assignment_list_returns_newest_20_of_130_fake_comments(agent_hub: TestClient) -> None:
@@ -374,3 +455,21 @@ def test_assignment_form_links_created_issue_and_locks_resubmission() -> None:
     )
     assert "submit.disabled = true" in html
     assert 'form.addEventListener("input", unlock)' in html
+
+
+def test_assignment_and_timeline_links_use_safe_href() -> None:
+    static = Path(__file__).resolve().parents[1] / "src" / "agent_core" / "static"
+    index = (static / "index.html").read_text(encoding="utf-8")
+    session = (static / "session.html").read_text(encoding="utf-8")
+
+    for html in (index, session):
+        assert "function safeHref(url)" in html
+        assert 'parsed.protocol === "https:"' in html
+        assert 'parsed.host === "github.com"' in html
+    assert "safeHref(r.url)" in index
+    assert "safeHref(a.url)" in index
+    assert "safeHref(c.url)" in index
+    assert "safeHref(url)" in index
+    assert "safeHref(inner.url)" in session
+    assert 'href="${esc(a.url)}"' not in index
+    assert 'href="${esc(inner.url)}"' not in session

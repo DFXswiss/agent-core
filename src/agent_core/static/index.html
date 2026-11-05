@@ -235,6 +235,14 @@
     function esc(s) {
       return String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]));
     }
+    function safeHref(url) {
+      try {
+        const parsed = new URL(url);
+        return parsed.protocol === "https:" && parsed.host === "github.com" ? parsed.href : null;
+      } catch (e) {
+        return null;
+      }
+    }
     (function themeToggle() {
       const KEY = "agent-theme";
       const root = document.documentElement;
@@ -278,7 +286,12 @@
     let agentRenderGen = 0;
     let agentSessionEpoch = 0;
     let latestAgentState = {};
-    const assignmentControllers = new Set();
+    let assignmentOwnersKey = "";
+    const ASSIGNMENT_REFRESH_MS = 15000;
+    const assignmentLoads = new Map();
+    const assignmentResults = new Map();
+    const assignmentCompletedAt = new Map();
+    const assignmentInvalidations = new Map();
     const agentPostControllers = new Set();
     const agentFormsInFlight = new Set();
     const partialAssignmentLocks = new Map();
@@ -294,12 +307,28 @@
       const s = stateInflight; stateInflight = null;
       const p = prsInflight; prsInflight = null;
       const u = usageInflight; usageInflight = null;
-      assignmentControllers.forEach(ctl => ctl.abort());
-      assignmentControllers.clear();
-      ++agentRenderGen;
       if (s) s.ctl.abort();
       if (p) p.ctl.abort();
       if (u) u.ctl.abort();
+    }
+
+    function abortAssignmentLoads() {
+      assignmentLoads.forEach(load => load.controller.abort());
+      assignmentLoads.clear();
+      assignmentResults.clear();
+      assignmentCompletedAt.clear();
+      assignmentInvalidations.clear();
+      ++agentRenderGen;
+    }
+
+    function expireAssignmentLoad(agent) {
+      assignmentResults.delete(agent);
+      assignmentCompletedAt.delete(agent);
+      assignmentInvalidations.set(agent, (assignmentInvalidations.get(agent) || 0) + 1);
+    }
+
+    function assignmentOwnerSetKey(agents) {
+      return Array.from(new Set(Array.isArray(agents) ? agents : [])).sort().join("\u0000");
     }
 
     function clearHubTables() {
@@ -311,6 +340,7 @@
       usageLastStartedAt = 0;
       latestAgentState = {};
       window.__ownedAgents = [];
+      assignmentOwnersKey = "";
       partialAssignmentLocks.clear();
       document.getElementById("k-tasks").textContent = "–";
       document.getElementById("k-agents").textContent = "–";
@@ -351,7 +381,8 @@
       sub.textContent = "Open PRs authored or assigned to people you can see.";
       const list = rows || [];
       tb.innerHTML = list.map(r => {
-        const href = r.url ? `<a href="${esc(r.url)}" target="_blank" rel="noopener">#${esc(r.number)}</a>` : esc(r.number);
+        const safeUrl = safeHref(r.url);
+        const href = safeUrl ? `<a href="${esc(safeUrl)}" target="_blank" rel="noopener">#${esc(r.number)}</a>` : esc(r.number);
         return `<tr>
           <td>${esc(r.author)}</td>
           <td>${esc(r.org)}</td>
@@ -517,12 +548,18 @@
     function applyPartialAssignmentLock(form, key, url) {
       const result = form.querySelector(".assignment-failure");
       const submit = form.querySelector('button[type="submit"]');
-      const link = document.createElement("a");
-      link.href = url;
-      link.target = "_blank";
-      link.rel = "noopener";
-      link.textContent = "Issue was created but the agent assignment failed — open it instead of submitting again";
-      result.replaceChildren(link);
+      const message = "Issue was created but the agent assignment failed — open it instead of submitting again";
+      const href = safeHref(url);
+      if (href) {
+        const link = document.createElement("a");
+        link.href = href;
+        link.target = "_blank";
+        link.rel = "noopener";
+        link.textContent = message;
+        result.replaceChildren(link);
+      } else {
+        result.textContent = message;
+      }
       result.hidden = false;
       submit.disabled = true;
       const unlock = () => {
@@ -554,21 +591,19 @@
       try { return await res.json(); } catch (e) { return {}; }
     }
 
-    async function renderAgents(agents, state) {
-      assignmentControllers.forEach(ctl => ctl.abort());
-      assignmentControllers.clear();
-      const generation = ++agentRenderGen;
-      latestAgentState = state || {};
-      const section = document.getElementById("agents-section");
-      const list = document.getElementById("agents-list");
-      const owned = Array.isArray(agents) ? agents : [];
-      section.classList.toggle("hidden", owned.length === 0);
-      if (!owned.length) { list.innerHTML = ""; return; }
-      const assignmentSets = await Promise.all(owned.map(async agent => {
-        const ctl = new AbortController();
-        assignmentControllers.add(ctl);
+    function loadAssignmentsForAgent(agent) {
+      const current = assignmentLoads.get(agent);
+      if (current) return current.promise;
+      const now = Date.now();
+      const completedAt = assignmentCompletedAt.get(agent) || 0;
+      if (assignmentResults.has(agent) && now - completedAt < ASSIGNMENT_REFRESH_MS) {
+        return Promise.resolve(assignmentResults.get(agent));
+      }
+      const controller = new AbortController();
+      const invalidation = assignmentInvalidations.get(agent) || 0;
+      const promise = (async () => {
         try {
-          const res = await fetch("/api/assignments?agent=" + encodeURIComponent(agent), { signal: ctl.signal });
+          const res = await fetch("/api/assignments?agent=" + encodeURIComponent(agent), { signal: controller.signal });
           if (!res.ok) {
             const failure = await responseJson(res);
             return { assignments: [], error: failure.detail || "HTTP " + res.status };
@@ -583,10 +618,29 @@
           return { assignments: body.assignments, error: null };
         } catch (e) {
           return { assignments: [], error: e.name === "AbortError" ? "request aborted" : String(e) };
-        } finally {
-          assignmentControllers.delete(ctl);
         }
-      }));
+      })();
+      assignmentLoads.set(agent, { controller, promise });
+      promise.then(result => {
+        const active = assignmentLoads.get(agent);
+        if (!active || active.promise !== promise) return;
+        assignmentLoads.delete(agent);
+        if ((assignmentInvalidations.get(agent) || 0) !== invalidation) return;
+        assignmentResults.set(agent, result);
+        assignmentCompletedAt.set(agent, Date.now());
+      });
+      return promise;
+    }
+
+    async function renderAgents(agents, state) {
+      const generation = ++agentRenderGen;
+      latestAgentState = state || {};
+      const section = document.getElementById("agents-section");
+      const list = document.getElementById("agents-list");
+      const owned = Array.isArray(agents) ? agents : [];
+      section.classList.toggle("hidden", owned.length === 0);
+      if (!owned.length) { list.innerHTML = ""; return; }
+      const assignmentSets = await Promise.all(owned.map(loadAssignmentsForAgent));
       if (generation !== agentRenderGen) return;
       const drafts = captureAgentDrafts();
       const focus = captureAgentFocus();
@@ -598,9 +652,15 @@
         const assignments = assignmentResult.error
           ? `<p class="assignment-load-error">Could not load assignments: ${esc(assignmentResult.error)}</p>`
           : assignmentResult.assignments.map(a => {
-          const comments = (a.comments || []).map(c => `<li><b>${esc(c.author)}</b> ${esc(c.created_at)}<br>${esc(c.body)}</li>`).join("") || "<li>No comments.</li>";
+          const comments = (a.comments || []).map(c => {
+            const commentUrl = safeHref(c.url);
+            const heading = `<b>${esc(c.author)}</b> ${esc(c.created_at)}`;
+            return `<li>${commentUrl ? `<a href="${esc(commentUrl)}" target="_blank" rel="noopener">${heading}</a>` : heading}<br>${esc(c.body)}</li>`;
+          }).join("") || "<li>No comments.</li>";
+          const assignmentUrl = safeHref(a.url);
+          const assignmentLabel = `${esc(a.repo)}#${esc(a.number)} — ${esc(a.title)}`;
           return `<div class="assignment">
-            <a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.repo)}#${esc(a.number)} — ${esc(a.title)}</a>
+            ${assignmentUrl ? `<a href="${esc(assignmentUrl)}" target="_blank" rel="noopener">${assignmentLabel}</a>` : assignmentLabel}
             <span>${esc(a.state)}</span><ul class="comments">${comments}</ul>
             <form class="reply-form" data-agent="${esc(agent)}" data-repo="${esc(a.repo)}" data-number="${esc(a.number)}">
               <input name="body" required maxlength="60000" placeholder="Reply as yourself"><button type="submit">Reply</button>
@@ -730,14 +790,19 @@
         document.getElementById("signed-in").classList.toggle("hidden", !user);
         if (!user) {
           abortHubFetches();
+          abortAssignmentLoads();
           clearHubTables();
           err.hidden = true;
           return;
         }
         if (window.__login && window.__login !== user.login) {
           abortHubFetches();
+          abortAssignmentLoads();
           clearHubTables();
         }
+        const nextOwnerKey = assignmentOwnerSetKey(user.owned_agents || []);
+        if (assignmentOwnersKey !== nextOwnerKey) abortAssignmentLoads();
+        assignmentOwnersKey = nextOwnerKey;
         window.__login = user.login;
         window.__ownedAgents = user.owned_agents || [];
         document.getElementById("who").textContent = user.login;
@@ -955,6 +1020,7 @@
         if (succeeded) {
           if (sessionEpoch !== agentSessionEpoch || login !== window.__login) return;
           partialAssignmentLocks.delete(formKey);
+          expireAssignmentLoad(form.dataset.agent);
           document.querySelectorAll("#agents-list .assign-form").forEach(current => {
             if (agentFormKey(current) === formKey) current.reset();
           });
@@ -1008,6 +1074,7 @@
         }
         if (succeeded) {
           if (sessionEpoch !== agentSessionEpoch || login !== window.__login) return;
+          expireAssignmentLoad(form.dataset.agent);
           document.querySelectorAll("#agents-list .reply-form").forEach(current => {
             if (agentFormKey(current) === formKey) current.reset();
           });
