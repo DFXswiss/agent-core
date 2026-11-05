@@ -53,9 +53,6 @@ class GitHub:
     def create_issue_comment(self, token: str, repo: str, number: int, body: str) -> dict[str, Any]:
         raise NotImplementedError
 
-    def issue_events(self, token: str, repo: str, number: int) -> list[dict[str, Any]]:
-        raise NotImplementedError
-
     def issue_comments(self, token: str, repo: str, number: int) -> list[dict[str, Any]]:
         raise NotImplementedError
 
@@ -311,12 +308,6 @@ class RealGitHub(GitHub):
             raise GitHubError("GitHub comment creation returned an invalid response")
         return result
 
-    def issue_events(self, token: str, repo: str, number: int) -> list[dict[str, Any]]:
-        result = self._request_json(
-            "GET", f"/repos/{repo}/issues/{number}/events", token, params={"per_page": 100}
-        )
-        return [item for item in result if isinstance(item, dict)] if isinstance(result, list) else []
-
     def issue_comments(self, token: str, repo: str, number: int) -> list[dict[str, Any]]:
         path = f"/repos/{repo}/issues/{number}/comments"
         first, headers = self._request_json_with_headers(
@@ -492,9 +483,6 @@ class FakeGitHub(GitHub):
             }
         )
         return dict(comment)
-
-    def issue_events(self, token: str, repo: str, number: int) -> list[dict[str, Any]]:
-        return []
 
     def issue_comments(self, token: str, repo: str, number: int) -> list[dict[str, Any]]:
         self.issue_calls.append(

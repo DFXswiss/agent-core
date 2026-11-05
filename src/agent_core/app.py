@@ -646,12 +646,15 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         try:
             issue_row = await asyncio.to_thread(hub.github.issue, token, repo, number)
             repo = _issue_repository_name(issue_row) or repo
+            # Every assigned agent's timeline gets the reply; only the actor's own
+            # agents grant the right to post it.
             assigned_agents = {
-                agent
-                for agent in _issue_assignees(issue_row)
-                if hub.roster.is_agent(agent) and hub.roster.owns_agent(actor, agent)
+                agent for agent in _issue_assignees(issue_row) if hub.roster.is_agent(agent)
             }
-            if not assigned_agents:
+            owned_assigned = {
+                agent for agent in assigned_agents if hub.roster.owns_agent(actor, agent)
+            }
+            if not owned_assigned:
                 raise HTTPException(status_code=403, detail="not an owner of an agent assigned to this issue")
             comment = await asyncio.to_thread(
                 hub.github.create_issue_comment, token, repo, number, comment_body
@@ -673,7 +676,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
             "type": "assignment.reply",
             "created_at": utcnow(),
             "payload": {
-                "agent": sorted(assigned_agents)[0],
+                "agent": sorted(owned_assigned)[0],
                 "agents": sorted(assigned_agents),
                 "repo": repo,
                 "issue_key": f"{repo}#{number}",
@@ -1221,6 +1224,9 @@ def _assignment_enrichment(
                 "url": url,
             }
         )
+    # GitHub returns comments oldest first; reversing keeps that order as the
+    # tie-break for equal timestamps instead of re-sorting by text.
+    comments.reverse()
     comments.sort(key=lambda row: row["created_at"], reverse=True)
     result = {
         "enriched": True,

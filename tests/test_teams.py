@@ -159,7 +159,6 @@ def test_valid_agents_block(tmp_path: Path) -> None:
     roster = load_roster(path)
     assert roster.agents == {"agentbot": frozenset({"owner"})}
     assert roster.is_agent("AgentBot")
-    assert roster.agent_owners("agentbot") == {"owner"}
     assert roster.owns_agent("OWNER", "AGENTBOT")
 
 

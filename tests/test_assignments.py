@@ -588,6 +588,32 @@ def test_assignment_list_returns_newest_20_of_130_fake_comments(agent_hub: TestC
     ]
 
 
+def test_assignment_comments_with_equal_timestamps_keep_github_order_newest_first(
+    agent_hub: TestClient,
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    assert agent_hub.post("/api/assignments", json=ASSIGNMENT).status_code == 201
+    github: FakeGitHub = agent_hub.app.state.hub.github
+    github.comments[("Acme/Widget", 1)] = [
+        {
+            "html_url": f"https://github.test/Acme/Widget/issues/1#issuecomment-{index}",
+            "user": {"login": "helperbot"},
+            "created_at": "2026-11-05T10:00:00Z" if index else "2026-11-05T09:00:00Z",
+            "body": f"comment-{index}",
+        }
+        for index in range(4)
+    ]
+
+    response = agent_hub.get("/api/assignments", params={"agent": "helperbot"})
+    comments = response.json()["assignments"][0]["comments"]
+    assert [comment["body"] for comment in comments] == [
+        "comment-3",
+        "comment-2",
+        "comment-1",
+        "comment-0",
+    ]
+
+
 def test_assignment_list_enriches_only_newest_50(agent_hub: TestClient) -> None:
     sign_in(agent_hub, "code-alice")
     hub = agent_hub.app.state.hub
@@ -768,6 +794,37 @@ def test_reply_targets_every_assigned_agent_timeline(
         "/api/sessions/second-agent-session/timeline"
     ).json()["timeline"]
     assert reply["id"] in [row["row_id"] for row in timeline]
+
+
+def test_reply_reaches_agents_of_other_owners_but_needs_an_own_agent(
+    mixed_owner_hub: TestClient,
+) -> None:
+    sign_in(mixed_owner_hub, "code-alice")
+    created = mixed_owner_hub.post("/api/assignments", json=ASSIGNMENT)
+    assert created.status_code == 201
+    github: FakeGitHub = mixed_owner_hub.app.state.hub.github
+    github.issues[("Acme/Widget", 1)]["assignees"] = [
+        {"login": "secondbot"},
+        {"login": "helperbot"},
+    ]
+
+    sign_in(mixed_owner_hub, "code-bob")
+    response = mixed_owner_hub.post(
+        "/api/assignments/Acme/Widget/1/comments",
+        json={"body": "Reply from the second owner."},
+    )
+    assert response.status_code == 201
+    state = mixed_owner_hub.get("/api/state").json()
+    reply = next(row for row in state["activity"] if row.get("type") == "assignment.reply")
+    assert reply["payload"]["agent"] == "secondbot"
+    assert reply["payload"]["agents"] == ["helperbot", "secondbot"]
+
+    github.issues[("Acme/Widget", 1)]["assignees"] = [{"login": "helperbot"}]
+    refused = mixed_owner_hub.post(
+        "/api/assignments/Acme/Widget/1/comments",
+        json={"body": "Not my agent."},
+    )
+    assert refused.status_code == 403
 
 
 def test_real_github_comments_follows_last_page_for_newest_comments(

@@ -18,9 +18,6 @@ class Roster:
     teams: dict[str, list[str]]
     agents: dict[str, frozenset[str]]
 
-    def agent_owners(self, login: str) -> set[str]:
-        return set(self.agents.get(login.strip().lower(), frozenset()))
-
     def is_agent(self, login: str) -> bool:
         return login.strip().lower() in self.agents
 
