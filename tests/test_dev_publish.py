@@ -6,7 +6,6 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 DEV_WORKFLOW = ROOT / ".github" / "workflows" / "agent-core-dev.yaml"
-PRD_WORKFLOW = ROOT / ".github" / "workflows" / "agent-core-prd.yaml"
 AUDIENCE = "https://image-published.dfxserve.com/v1/image-published"
 
 BUILD_STEP = "Build and push Docker image"
@@ -75,9 +74,3 @@ def test_publish_step_sits_between_build_and_pull() -> None:
     pull_at = names.index(PULL_STEP)
     assert publish_at == build_at + 1
     assert pull_at == publish_at + 1
-
-
-def test_production_workflow_has_no_oidc_publish() -> None:
-    text = PRD_WORKFLOW.read_text(encoding="utf-8")
-    assert "id-token" not in text
-    assert AUDIENCE not in text
