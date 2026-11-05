@@ -30,6 +30,18 @@ class _FailingReplicaConnection:
         self.connection.close()
 
 
+def _mark_request_done(
+    store: Store, key: tuple[str, str, str], owner: str
+) -> None:
+    updated = store.execute(
+        "UPDATE request_reservation SET status = 'done' "
+        "WHERE actor = ? AND activity_type = ? AND request_id = ? "
+        "AND status = 'pending' AND owner = ?",
+        (*key, owner),
+    )
+    assert updated.rowcount == 1
+
+
 def test_store_migrates_columns_without_losing_rows(tmp_path: Path) -> None:
     database = tmp_path / "old-hub.sqlite"
     connection = sqlite3.connect(database)
@@ -101,7 +113,7 @@ def test_store_migrates_columns_without_losing_rows(tmp_path: Path) -> None:
         reopened.close()
 
 
-def test_request_reservation_busy_expiry_finish_and_release(tmp_path: Path) -> None:
+def test_request_reservation_busy_expiry_done_and_release(tmp_path: Path) -> None:
     store = Store(str(tmp_path / "reservations.sqlite"))
     key = ("alice", "assignment.created", "request-one")
     first_owner = "owner-one"
@@ -135,7 +147,7 @@ def test_request_reservation_busy_expiry_finish_and_release(tmp_path: Path) -> N
             second_owner,
             "2026-11-05T10:02:00Z",
             "2026-11-05T10:04:00Z",
-        ) == "reserved"
+        ) == "taken_over"
         assert not store.renew_request(
             *key,
             first_owner,
@@ -143,14 +155,13 @@ def test_request_reservation_busy_expiry_finish_and_release(tmp_path: Path) -> N
             "2026-11-05T10:04:01Z",
         )
         assert not store.release_request(*key, first_owner)
-        assert not store.finish_request(*key, first_owner)
         assert store.renew_request(
             *key,
             second_owner,
             "2026-11-05T10:02:01Z",
             "2026-11-05T10:04:01Z",
         )
-        assert store.finish_request(*key, second_owner)
+        _mark_request_done(store, key, second_owner)
         assert store.reserve_request(
             *key,
             fingerprint,
@@ -376,7 +387,7 @@ def test_record_web_event_for_request_rejects_owner_after_takeover(
             "new-owner",
             "2026-11-05T10:01:00Z",
             "2026-11-05T10:03:00Z",
-        ) == "reserved"
+        ) == "taken_over"
 
         assert not store.record_web_event_for_request(
             "web:alice",

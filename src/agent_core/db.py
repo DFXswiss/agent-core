@@ -222,7 +222,7 @@ class Store:
                         "WHERE actor = ? AND activity_type = ? AND request_id = ?",
                         (lease_until, owner, actor, activity_type, request_id),
                     )
-                    result = "reserved"
+                    result = "taken_over"
                 self._conn.commit()
                 return result
             except Exception:
@@ -243,17 +243,6 @@ class Store:
             "WHERE actor = ? AND activity_type = ? AND request_id = ? "
             "AND status = 'pending' AND owner = ? AND lease_until > ?",
             (lease_until, actor, activity_type, request_id, owner, now),
-        )
-        return updated.rowcount == 1
-
-    def finish_request(
-        self, actor: str, activity_type: str, request_id: str, owner: str
-    ) -> bool:
-        updated = self.execute(
-            "UPDATE request_reservation SET status = 'done' "
-            "WHERE actor = ? AND activity_type = ? AND request_id = ? "
-            "AND status = 'pending' AND owner = ?",
-            (actor, activity_type, request_id, owner),
         )
         return updated.rowcount == 1
 

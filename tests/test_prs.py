@@ -342,9 +342,9 @@ def test_index_agent_render_preserves_forms_and_handles_fetch_lifecycle() -> Non
     assert "section.contains(document.activeElement)" not in render_agents
     assert "captureAgentDrafts()" in render_agents
     assert "restoreAgentFormState(drafts)" in render_agents
-    assert 'values.__requestId = form.dataset.requestId || ""' in html
-    assert "form.dataset.requestId = values.__requestId" in html
-    assert "Could not load assignments:" in render_agents
+    assert "captureAgentDraft(" in html  # behaviour is executed in tests/test_index_page_js.py
+    assert "if (values.__requestId) form.dataset.requestId = values.__requestId;" in html
+    assert "Could not load assignments:" in html
     assert "try { body = await res.json(); } catch" in assignment_load_fn
     assert "No assignments." in render_agents
     assert "Promise.all(owned.map(loadAssignmentsForAgent))" in render_agents

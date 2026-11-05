@@ -15,7 +15,10 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
+from pydantic import StrictStr
 from starlette.middleware.sessions import SessionMiddleware
 
 from .config import Config
@@ -61,8 +64,15 @@ GITHUB_TOKEN_REQUIRED_DETAIL = "sign in on the website once so the hub holds you
 REQUEST_FINGERPRINT_CONFLICT_DETAIL = (
     "request id was used for different content; reload the assignment list"
 )
+REQUEST_ALREADY_COMPLETED_DETAIL = "request already completed; reload the assignment list"
 REQUEST_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 HUB_AUTHORED_ACTIVITY_TYPES = frozenset({"assignment.created", "assignment.reply"})
+ASSIGNMENT_WRITE_ROUTES = frozenset(
+    {
+        "/api/assignments",
+        "/api/assignments/{owner}/{name}/{number}/comments",
+    }
+)
 _MISSING = object()
 
 
@@ -211,6 +221,24 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         if request_id_final is not None:
             content["request_id_final"] = request_id_final
         return JSONResponse(content, status_code=exc.status_code, headers=exc.headers)
+
+    @app.exception_handler(RequestValidationError)
+    async def request_validation_error_response(
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        response = await request_validation_exception_handler(request, exc)
+        route = request.scope.get("route")
+        if getattr(route, "path", None) not in ASSIGNMENT_WRITE_ROUTES:
+            return response
+        try:
+            raw_body = await request.json()
+        except Exception:
+            return response
+        if not isinstance(raw_body, dict) or "request_id" not in raw_body:
+            return response
+        content = loads(response.body)
+        content["request_id_final"] = True
+        return JSONResponse(content, status_code=response.status_code)
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -503,7 +531,9 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         return {"generated_at": utcnow(), "prs": prs, "source": "github", "truncated": truncated}
 
     @app.post("/api/assignments")
-    async def api_assignment_create(request: Request, body: dict[str, Any]):
+    async def api_assignment_create(
+        request: Request, body: dict[str, StrictStr | None]
+    ):
         _prepare_request_id_error_state(request, body)
         actor, device_actor = _request_actor(hub, request)
         if device_actor and hub.roster.is_agent(actor):
@@ -534,6 +564,8 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                 now,
                 lease_until,
             )
+            if reservation == "taken_over":
+                request.state.request_id_prior_write = True
             if reservation == "conflict":
                 raise HTTPException(
                     status_code=409,
@@ -552,7 +584,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                     return JSONResponse(response, status_code=200)
                 raise HTTPException(
                     status_code=409,
-                    detail="request already completed; reload the assignment list",
+                    detail=REQUEST_ALREADY_COMPLETED_DETAIL,
                 )
             if reservation == "busy":
                 raise HTTPException(
@@ -777,7 +809,11 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
 
     @app.post("/api/assignments/{owner}/{name}/{number}/comments")
     async def api_assignment_reply(
-        request: Request, owner: str, name: str, number: int, body: dict[str, Any]
+        request: Request,
+        owner: str,
+        name: str,
+        number: int,
+        body: dict[str, StrictStr | None],
     ):
         _prepare_request_id_error_state(request, body)
         actor, device_actor = _request_actor(hub, request)
@@ -811,6 +847,8 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                 now,
                 lease_until,
             )
+            if reservation == "taken_over":
+                request.state.request_id_prior_write = True
             if reservation == "conflict":
                 raise HTTPException(
                     status_code=409,
@@ -828,7 +866,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                     return JSONResponse({"url": replay["url"]}, status_code=200)
                 raise HTTPException(
                     status_code=409,
-                    detail="request already completed; reload the assignment list",
+                    detail=REQUEST_ALREADY_COMPLETED_DETAIL,
                 )
             if reservation == "busy":
                 raise HTTPException(
@@ -1490,6 +1528,8 @@ def _request_id_error_is_final(
         return False
     if detail == REQUEST_FINGERPRINT_CONFLICT_DETAIL:
         return True
+    if detail == REQUEST_ALREADY_COMPLETED_DETAIL:
+        return True
     if detail in (GITHUB_REAUTH_DETAIL, GITHUB_TOKEN_REQUIRED_DETAIL):
         return not getattr(request.state, "request_id_prior_write", False)
     return False
@@ -1894,6 +1934,11 @@ def _timeline_item(row: Any, payload: dict[str, Any]) -> dict[str, Any]:
     return item
 
 
+def _timeline_row_matches_session_login(row: Any, session_login: str) -> bool:
+    login = row["github_login"]
+    return isinstance(login, str) and login.lower() == session_login
+
+
 def _session_timeline(hub: Hub, session_row: Any, allowed: set[str]) -> list[dict[str, Any]]:
     session_id = session_row["row_id"]
     session_login = str(session_row["github_login"]).lower()
@@ -1913,7 +1958,11 @@ def _session_timeline(hub: Hub, session_row: Any, allowed: set[str]) -> list[dic
         if row["table_name"] != "task":
             continue
         payload = loads(row["payload"])
-        if not isinstance(payload, dict) or _payload_relation(payload, "session_id") != session_id:
+        if (
+            not isinstance(payload, dict)
+            or not _timeline_row_matches_session_login(row, session_login)
+            or _payload_relation(payload, "session_id") != session_id
+        ):
             continue
         selected.append((row, payload))
         row_id = row["row_id"]
@@ -1929,6 +1978,11 @@ def _session_timeline(hub: Hub, session_row: Any, allowed: set[str]) -> list[dic
         if not isinstance(payload, dict):
             continue
         if not _trusted_hub_activity(row, payload):
+            continue
+        if (
+            payload.get("type") not in HUB_AUTHORED_ACTIVITY_TYPES
+            and not _timeline_row_matches_session_login(row, session_login)
+        ):
             continue
         task_id = _payload_relation(payload, "task_id")
         inner = payload.get("payload")
@@ -1955,6 +2009,11 @@ def _session_timeline(hub: Hub, session_row: Any, allowed: set[str]) -> list[dic
             continue
         payload = loads(row["payload"])
         if not isinstance(payload, dict):
+            continue
+        if (
+            row["table_name"] in ("checklist_item", "local_check", "review_gate")
+            and not _timeline_row_matches_session_login(row, session_login)
+        ):
             continue
         task_id = _payload_relation(payload, "task_id")
         if _payload_relation(payload, "session_id") == session_id or (task_id != "" and task_id in task_ids):

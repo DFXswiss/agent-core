@@ -10,7 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import agent_core.app as app_module
-from agent_core.db import dumps
+from agent_core.db import Store, dumps
 from agent_core.github import FakeGitHub, GitHubError, RealGitHub, valid_repository_name
 from tests.conftest import pair_device, sign_in
 from tests.test_agent_pair_control import _pair_as
@@ -35,6 +35,22 @@ def _assignment_fingerprint(payload: dict[str, str] = ASSIGNMENT) -> str:
             "agent": payload["agent"].lower(),
         }
     )
+
+
+def _mark_request_done(
+    store: Store,
+    actor: str,
+    activity_type: str,
+    request_id: str,
+    owner: str,
+) -> None:
+    updated = store.execute(
+        "UPDATE request_reservation SET status = 'done' "
+        "WHERE actor = ? AND activity_type = ? AND request_id = ? "
+        "AND status = 'pending' AND owner = ?",
+        (actor, activity_type, request_id, owner),
+    )
+    assert updated.rowcount == 1
 
 
 class _Response:
@@ -319,6 +335,65 @@ def test_assignment_validation_and_not_found_errors_finalize_request_id(
     assert response.json()["request_id_final"] is True
 
 
+def test_assignment_reply_path_validation_finalizes_request_id(
+    agent_hub: TestClient,
+) -> None:
+    sign_in(agent_hub, "code-alice")
+
+    response = agent_hub.post(
+        "/api/assignments/Acme/Widget/not-a-number/comments",
+        json={"body": "A reply.", "request_id": REQUEST_ID},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["request_id_final"] is True
+    assert response.json()["detail"][0]["loc"] == ["path", "number"]
+
+
+def test_assignment_create_body_type_validation_finalizes_request_id(
+    agent_hub: TestClient,
+) -> None:
+    sign_in(agent_hub, "code-alice")
+
+    response = agent_hub.post(
+        "/api/assignments",
+        json=dict(ASSIGNMENT, body=7, request_id=REQUEST_ID),
+    )
+
+    assert response.status_code == 422
+    assert response.json()["request_id_final"] is True
+    assert response.json()["detail"][0]["loc"] == ["body", "body"]
+
+
+def test_request_validation_request_id_field_is_assignment_route_only(
+    agent_hub: TestClient,
+) -> None:
+    sign_in(agent_hub, "code-alice")
+
+    response = agent_hub.post(
+        "/api/session/control",
+        json={"request_id": REQUEST_ID},
+    )
+
+    assert response.status_code == 422
+    assert "request_id_final" not in response.json()
+
+
+def test_assignment_non_json_validation_has_no_request_id_final(
+    agent_hub: TestClient,
+) -> None:
+    sign_in(agent_hub, "code-alice")
+
+    response = agent_hub.post(
+        "/api/assignments",
+        content="{",
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 422
+    assert "request_id_final" not in response.json()
+
+
 def test_assignment_forbidden_error_finalizes_request_id(
     agent_hub: TestClient,
 ) -> None:
@@ -375,7 +450,7 @@ def test_assignment_create_request_id_replays_recorded_success(
     assert REQUEST_ID in events[0]["payload"]
 
 
-def test_assignment_create_recovers_after_timeout_that_created_the_issue(
+def test_assignment_create_takeover_reauth_recovers_issue_after_timeout(
     agent_hub: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     sign_in(agent_hub, "code-alice")
@@ -390,15 +465,27 @@ def test_assignment_create_recovers_after_timeout_that_created_the_issue(
     payload = dict(ASSIGNMENT, request_id=REQUEST_ID)
     failed = agent_hub.post("/api/assignments", json=payload)
     monkeypatch.setattr(github, "create_issue", create_issue)
-    busy = agent_hub.post("/api/assignments", json=payload)
     agent_hub.app.state.hub.store.execute(
         "UPDATE request_reservation SET lease_until = ? WHERE request_id = ?",
         ("2000-01-01T00:00:00Z", REQUEST_ID),
     )
+    recent_issues = github.recent_issues_by_creator
+
+    def expired_token(*_args, **_kwargs):
+        raise GitHubError("GitHub request failed: HTTP 401", status_code=401)
+
+    monkeypatch.setattr(github, "recent_issues_by_creator", expired_token)
+    reauth = agent_hub.post("/api/assignments", json=payload)
+    monkeypatch.setattr(github, "recent_issues_by_creator", recent_issues)
+    sign_in(agent_hub, "code-alice")
     recovered = agent_hub.post("/api/assignments", json=payload)
 
     assert failed.status_code == 502
-    assert busy.status_code == 409
+    assert reauth.status_code == 409
+    assert reauth.json() == {
+        "detail": "sign in on the website again",
+        "request_id_final": False,
+    }
     assert recovered.status_code == 201
     assert recovered.json()["number"] == 1
     assert len(
@@ -475,7 +562,7 @@ def test_assignment_reply_request_id_replays_recorded_success(
     assert replayed.json() == {"url": activity["payload"]["url"]}
 
 
-def test_assignment_reply_recovers_after_timeout_that_created_the_comment(
+def test_assignment_reply_takeover_reauth_recovers_comment_after_timeout(
     agent_hub: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     sign_in(agent_hub, "code-alice")
@@ -491,15 +578,29 @@ def test_assignment_reply_recovers_after_timeout_that_created_the_comment(
     payload = {"body": "A reply.", "request_id": REQUEST_ID}
     failed = agent_hub.post("/api/assignments/Acme/Widget/1/comments", json=payload)
     monkeypatch.setattr(github, "create_issue_comment", create_comment)
-    busy = agent_hub.post("/api/assignments/Acme/Widget/1/comments", json=payload)
     agent_hub.app.state.hub.store.execute(
         "UPDATE request_reservation SET lease_until = ? WHERE request_id = ?",
         ("2000-01-01T00:00:00Z", REQUEST_ID),
     )
+    issue = github.issue
+
+    def expired_token(*_args, **_kwargs):
+        raise GitHubError("GitHub request failed: HTTP 401", status_code=401)
+
+    monkeypatch.setattr(github, "issue", expired_token)
+    reauth = agent_hub.post(
+        "/api/assignments/Acme/Widget/1/comments", json=payload
+    )
+    monkeypatch.setattr(github, "issue", issue)
+    sign_in(agent_hub, "code-alice")
     recovered = agent_hub.post("/api/assignments/Acme/Widget/1/comments", json=payload)
 
     assert failed.status_code == 502
-    assert busy.status_code == 409
+    assert reauth.status_code == 409
+    assert reauth.json() == {
+        "detail": "sign in on the website again",
+        "request_id_final": False,
+    }
     assert recovered.status_code == 201
     assert len(
         [
@@ -607,8 +708,12 @@ def test_completed_assignment_request_without_replay_row_is_conflict(
         "2026-11-05T10:00:00Z",
         "2026-11-05T10:02:00Z",
     ) == "reserved"
-    hub.store.finish_request(
-        "alice", "assignment.created", REQUEST_ID, "existing-owner"
+    _mark_request_done(
+        hub.store,
+        "alice",
+        "assignment.created",
+        REQUEST_ID,
+        "existing-owner",
     )
     calls_before = list(hub.github.issue_calls)
 
@@ -619,7 +724,7 @@ def test_completed_assignment_request_without_replay_row_is_conflict(
     assert response.status_code == 409
     assert response.json() == {
         "detail": "request already completed; reload the assignment list",
-        "request_id_final": False,
+        "request_id_final": True,
     }
     assert hub.github.issue_calls == calls_before
 
@@ -679,7 +784,7 @@ def test_assignment_takeover_stops_old_owner_before_github_write(
             "new-owner",
             "2026-11-05T10:00:00Z",
             "9999-01-01T00:00:00Z",
-        ) == "reserved"
+        ) == "taken_over"
         return original_recent(*args)
 
     monkeypatch.setattr(github, "recent_issues_by_creator", take_over_during_recovery)
@@ -733,7 +838,7 @@ def test_assignment_takeover_after_github_write_rejects_old_owner_without_event(
             "new-owner",
             "2026-11-05T10:00:00Z",
             "9999-01-01T00:00:00Z",
-        ) == "reserved"
+        ) == "taken_over"
         return original_issue(*args)
 
     monkeypatch.setattr(github, "issue", take_over_after_write)

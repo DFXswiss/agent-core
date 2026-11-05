@@ -158,6 +158,85 @@ process.stdout.write(JSON.stringify({{
     assert out["unavailable"] is None
 
 
+def test_agent_card_decisions_and_drafts() -> None:
+    node = shutil.which("node")
+    assert node is not None, "node is required to run the dashboard page test"
+    html = _index_html()
+    functions = "\n".join(
+        _extract(html, name)
+        for name in (
+            "agentCardOrder",
+            "agentCardState",
+            "captureAgentDraft",
+            "restoreAgentDraft",
+            "partialAssignmentLockUrl",
+        )
+    )
+    script = f"""
+{functions}
+const sourceOrder = ["zetabot", "alphabot"];
+const ordered = agentCardOrder(sourceOrder);
+const orderedBeforeMutation = ordered.slice();
+ordered.push("otherbot");
+const states = [
+  agentCardState({{assignments: [{{number: 1}}], error: null}}),
+  agentCardState({{assignments: [], error: "HTTP 502"}}),
+  agentCardState({{assignments: [], error: "Timed out loading assignments."}}),
+  agentCardState({{assignments: [], error: null, loading: true}}),
+];
+const alphaKey = JSON.stringify(["assign", "alphabot"]);
+const zetaKey = JSON.stringify(["assign", "zetabot"]);
+let drafts = {{}};
+drafts = captureAgentDraft(drafts, alphaKey, {{repo: "Acme/One", title: "A"}}, "request-a");
+drafts = captureAgentDraft(drafts, zetaKey, {{repo: "Acme/Two", title: "Z"}}, "request-z");
+const alpha = restoreAgentDraft(drafts, alphaKey);
+alpha.repo = "changed";
+process.stdout.write(JSON.stringify({{
+  orderedBeforeMutation,
+  sourceOrder,
+  nonArrayOrder: agentCardOrder(null),
+  states,
+  alpha: restoreAgentDraft(drafts, alphaKey),
+  zeta: restoreAgentDraft(drafts, zetaKey),
+  missing: restoreAgentDraft(drafts, JSON.stringify(["assign", "missingbot"])),
+  lockUrls: [
+    partialAssignmentLockUrl({{url: "https://github.test/issue/1"}}),
+    partialAssignmentLockUrl({{url: ""}}),
+    partialAssignmentLockUrl({{detail: "failed"}}),
+    partialAssignmentLockUrl({{url: 7}}),
+  ],
+}}));
+"""
+    result = subprocess.run(
+        [node, "-"], input=script, capture_output=True, text=True, check=True, timeout=30
+    )
+    out = json.loads(result.stdout)
+    assert out["orderedBeforeMutation"] == ["zetabot", "alphabot"]
+    assert out["sourceOrder"] == ["zetabot", "alphabot"]
+    assert out["nonArrayOrder"] == []
+    assert out["states"] == [
+        {"kind": "success", "message": ""},
+        {"kind": "error", "message": "Could not load assignments: HTTP 502"},
+        {
+            "kind": "timeout",
+            "message": "Could not load assignments: Timed out loading assignments.",
+        },
+        {"kind": "loading", "message": "Loading assignments…"},
+    ]
+    assert out["alpha"] == {
+        "repo": "Acme/One",
+        "title": "A",
+        "__requestId": "request-a",
+    }
+    assert out["zeta"] == {
+        "repo": "Acme/Two",
+        "title": "Z",
+        "__requestId": "request-z",
+    }
+    assert out["missing"] == {}
+    assert out["lockUrls"] == ["https://github.test/issue/1", None, None, None]
+
+
 def test_dashboard_uses_only_query_session_api_routes() -> None:
     html = _index_html()
     assert "/api/sessions/" not in html

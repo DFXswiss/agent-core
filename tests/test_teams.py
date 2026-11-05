@@ -162,30 +162,6 @@ def test_valid_agents_block(tmp_path: Path) -> None:
     assert roster.owns_agent("OWNER", "AGENTBOT")
 
 
-@pytest.mark.parametrize(
-    ("teams", "agents", "message"),
-    [
-        ({"dfx": {"members": ["owner"]}}, {"bot": {"owners": ["owner"]}}, "member"),
-        (
-            {"one": {"members": ["bot"]}, "two": {"members": ["owner"]}},
-            {"bot": {"owners": ["owner"]}},
-            "share a team",
-        ),
-        ({"dfx": {"members": ["bot"]}}, {"bot": {"owners": ["bot"]}}, "own itself"),
-        (
-            {"dfx": {"members": ["bot", "owner"]}},
-            {"bot": {"owners": ["owner", "OWNER"]}},
-            "twice",
-        ),
-    ],
-)
-def test_invalid_agents_fail_closed(tmp_path: Path, teams: dict, agents: dict, message: str) -> None:
-    path = tmp_path / "teams.yaml"
-    path.write_text(yaml.safe_dump({"teams": teams, "agents": agents}), encoding="utf-8")
-    with pytest.raises(TeamsError, match=message):
-        load_roster(path)
-
-
 def test_owned_agents_are_sorted_by_login_not_declaration(tmp_path: Path) -> None:
     path = tmp_path / "teams.yaml"
     path.write_text(

@@ -371,6 +371,21 @@
       return Array.from(new Set(Array.isArray(agents) ? agents : [])).sort().join("\u0000");
     }
 
+    function agentCardOrder(agents) {
+      return Array.isArray(agents) ? agents.slice() : [];
+    }
+
+    function agentCardState(result) {
+      if (!result || result.loading) return { kind: "loading", message: "Loading assignments…" };
+      if (result.error) {
+        return {
+          kind: result.error === "Timed out loading assignments." ? "timeout" : "error",
+          message: "Could not load assignments: " + result.error,
+        };
+      }
+      return { kind: "success", message: "" };
+    }
+
     function clearHubTables() {
       ++agentRenderGen;
       ++agentSessionEpoch;
@@ -587,13 +602,21 @@
       });
     }
 
+    function captureAgentDraft(drafts, key, values, requestId) {
+      return { ...drafts, [key]: { ...values, __requestId: requestId || "" } };
+    }
+
+    function restoreAgentDraft(drafts, key) {
+      const values = drafts && drafts[key];
+      return values && typeof values === "object" ? { ...values } : {};
+    }
+
     function captureAgentDrafts() {
-      const drafts = new Map();
+      let drafts = {};
       document.querySelectorAll("#agents-list .assign-form, #agents-list .reply-form").forEach(form => {
         const values = {};
         form.querySelectorAll("input[name], textarea[name]").forEach(field => { values[field.name] = field.value; });
-        values.__requestId = form.dataset.requestId || "";
-        drafts.set(agentFormKey(form), values);
+        drafts = captureAgentDraft(drafts, agentFormKey(form), values, form.dataset.requestId);
       });
       return drafts;
     }
@@ -661,10 +684,14 @@
       form.addEventListener("change", unlock);
     }
 
+    function partialAssignmentLockUrl(failure) {
+      return failure && typeof failure.url === "string" && failure.url ? failure.url : null;
+    }
+
     function restoreAgentFormState(drafts) {
       document.querySelectorAll("#agents-list .assign-form, #agents-list .reply-form").forEach(form => {
         const key = agentFormKey(form);
-        const values = drafts.get(key) || {};
+        const values = restoreAgentDraft(drafts, key);
         form.querySelectorAll("input[name], textarea[name]").forEach(field => {
           if (Object.prototype.hasOwnProperty.call(values, field.name)) field.value = values[field.name];
         });
@@ -753,10 +780,11 @@
           `<li>${sessionLink(s.id)} — ${esc(s.status)}</li>`
         ).join("") || "<li>No sessions.</li>";
         const assignmentResult = assignmentSets[index];
-        const assignments = assignmentResult.loading
+        const cardState = agentCardState(assignmentResult);
+        const assignments = cardState.kind === "loading"
           ? '<p class="assignment-load-state">Loading assignments…</p>'
-          : assignmentResult.error
-          ? `<p class="assignment-load-error">Could not load assignments: ${esc(assignmentResult.error)}</p>`
+          : cardState.kind === "error" || cardState.kind === "timeout"
+          ? `<p class="assignment-load-error">${esc(cardState.message)}</p>`
           : assignmentResult.assignments.map(a => {
           const comments = (a.comments || []).map(c => {
             const commentUrl = safeHref(c.url);
@@ -791,7 +819,7 @@
       latestAgentState = state || {};
       const section = document.getElementById("agents-section");
       const list = document.getElementById("agents-list");
-      const owned = Array.isArray(agents) ? agents : [];
+      const owned = agentCardOrder(agents);
       section.classList.toggle("hidden", owned.length === 0);
       if (!owned.length) { list.innerHTML = ""; return; }
       renderAgentCards(owned, latestAgentState, owned.map(agent =>
@@ -1104,9 +1132,10 @@
               clearRenderedRequestIds(formKey);
             }
             if (sessionEpoch !== agentSessionEpoch || login !== window.__login) return;
-            if (typeof failure.url === "string" && failure.url) {
-              partialAssignmentLocks.set(formKey, failure.url);
-              applyPartialAssignmentLock(form, formKey, failure.url);
+            const partialUrl = partialAssignmentLockUrl(failure);
+            if (partialUrl) {
+              partialAssignmentLocks.set(formKey, partialUrl);
+              applyPartialAssignmentLock(form, formKey, partialUrl);
             } else {
               document.getElementById("action-err").hidden = false;
               document.getElementById("action-err").textContent = failure.detail || "assignment failed";

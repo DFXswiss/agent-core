@@ -454,6 +454,22 @@ def test_timeline_order_relations_and_visibility(agent_hub: TestClient) -> None:
         login="helperbot",
         payload={"id": "non-string-task-relation", "task_id": 7, "ran_at": "2026-11-04T10:05:00Z"},
     )
+    for table, relation in (
+        ("activity", {"session_id": "timeline-session"}),
+        ("task", {"session_id": "timeline-session"}),
+        ("checklist_item", {"task_id": "timeline-task"}),
+        ("local_check", {"task_id": "timeline-task"}),
+        ("review_gate", {"task_id": "timeline-task"}),
+    ):
+        row_id = f"teammate-{table}"
+        _insert_replica(
+            agent_hub,
+            table=table,
+            row_id=row_id,
+            updated_at="2026-11-04T10:06:00Z",
+            login="bob",
+            payload={"id": row_id, **relation},
+        )
     response = agent_hub.get("/api/sessions/timeline-session/timeline")
     assert response.status_code == 200
     body = response.json()
@@ -479,7 +495,7 @@ def test_timeline_order_relations_and_visibility(agent_hub: TestClient) -> None:
     assert agent_hub.get("/sessions/timeline-session").status_code == 404
 
 
-def test_timeline_equal_times_sort_by_row_id_before_table(
+def test_timeline_equal_times_sort_by_row_id_then_table(
     agent_hub: TestClient,
 ) -> None:
     sign_in(agent_hub, "code-alice")
@@ -494,11 +510,11 @@ def test_timeline_equal_times_sort_by_row_id_before_table(
     _insert_replica(
         agent_hub,
         table="activity",
-        row_id="z-activity",
+        row_id="same-row",
         updated_at="2026-11-05T10:00:00Z",
         login="helperbot",
         payload={
-            "id": "z-activity",
+            "id": "same-row",
             "session_id": "tie-session",
             "created_at": "2026-11-05T10:00:00Z",
         },
@@ -506,11 +522,11 @@ def test_timeline_equal_times_sort_by_row_id_before_table(
     _insert_replica(
         agent_hub,
         table="task",
-        row_id="a-task",
+        row_id="same-row",
         updated_at="2026-11-05T10:00:00Z",
         login="helperbot",
         payload={
-            "id": "a-task",
+            "id": "same-row",
             "session_id": "tie-session",
             "created_at": "2026-11-05T10:00:00Z",
         },
@@ -520,10 +536,10 @@ def test_timeline_equal_times_sort_by_row_id_before_table(
         "timeline"
     ]
 
-    assert [row["row_id"] for row in timeline] == [
-        "tie-session",
-        "a-task",
-        "z-activity",
+    assert [(row["table"], row["row_id"]) for row in timeline] == [
+        ("session", "tie-session"),
+        ("activity", "same-row"),
+        ("task", "same-row"),
     ]
 
 
