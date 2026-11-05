@@ -292,7 +292,7 @@ The actor must own the agent. A bearer belonging to an agent is refused. Reposit
 {"repo":"Owner/Name","number":42,"url":"https://github.com/Owner/Name/issues/42","agent":"agent-login","actor":"owner-login"}
 ```
 
-Reservations persist whether a GitHub write may already have occurred. A takeover or a path that reaches a GitHub write records that state. Recovery-phase reauthentication leaves the reservation pending with an expired, immediately takeable lease, so every later retry keeps the request id for marker recovery.
+Reservations persist whether a GitHub write may already have occurred. A write that GitHub answers with a definite HTTP status, or a created issue whose later steps fail, expires the lease at once so a retry with the same `request_id` can take over and recover; only a write without any answer keeps its lease. A takeover or a path that reaches a GitHub write records that state. Recovery-phase reauthentication leaves the reservation pending with an expired, immediately takeable lease, so every later retry keeps the request id for marker recovery.
 
 Each reservation stores its first-reserve time. Marker recovery paginates creator issues or issue comments back to that time and reuses only an object authored by the actor whose body, after removing the marker line, matches the expected posted body. If the bounded search cannot complete because its budget or page limit runs out or a request fails in transport, the hub returns retryable 409 without a GitHub write or activity row; a GitHub HTTP error during recovery returns 502 with its bounded detail (and the issue `url`/`number` once known). Both keep the reservation and answer `request_id_final: false`.
 

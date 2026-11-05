@@ -1596,6 +1596,42 @@ def test_recovering_reply_reports_a_lasting_github_error_and_keeps_the_reservati
     assert dict(reservation) == {"status": "pending", "prior_write": 1}
 
 
+@pytest.mark.parametrize("route", ["create", "reply"])
+def test_definite_write_error_lets_an_immediate_retry_take_over(
+    agent_hub: TestClient, monkeypatch: pytest.MonkeyPatch, route: str
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    hub = agent_hub.app.state.hub
+    github: FakeGitHub = hub.github
+    if route == "reply":
+        assert agent_hub.post("/api/assignments", json=ASSIGNMENT).status_code == 201
+        name, path, payload = (
+            "create_issue_comment",
+            "/api/assignments/Acme/Widget/1/comments",
+            {"body": "A reply.", "request_id": REQUEST_ID},
+        )
+    else:
+        name, path, payload = "create_issue", "/api/assignments", dict(ASSIGNMENT, request_id=REQUEST_ID)
+    original = getattr(github, name)
+
+    def rejected(*_args, **_kwargs):
+        raise GitHubError("GitHub request failed: HTTP 422", status_code=422)
+
+    monkeypatch.setattr(github, name, rejected)
+    first = agent_hub.post(path, json=payload)
+    lease = hub.store.query_one(
+        "SELECT status, lease_until FROM request_reservation WHERE request_id = ?",
+        (REQUEST_ID,),
+    )
+    monkeypatch.setattr(github, name, original)
+    retry = agent_hub.post(path, json=payload)
+
+    assert first.status_code == 502
+    assert first.json()["request_id_final"] is False
+    assert dict(lease) == {"status": "pending", "lease_until": ""}
+    assert retry.status_code == 201, retry.text
+
+
 def test_concurrent_assignment_requests_create_one_issue(
     agent_hub: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

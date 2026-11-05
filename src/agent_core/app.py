@@ -726,6 +726,11 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                 )
                 current = await asyncio.to_thread(hub.github.add_assignees, token, repo, number, [agent])
             if agent not in _issue_assignees(current):
+                if request_id is not None:
+                    # The issue exists; a retry may take over at once and recover it.
+                    hub.store.expire_request(
+                        actor, "assignment.created", request_id, request_owner
+                    )
                 return JSONResponse(
                     _request_id_error_content(request, 502, {
                         "detail": "GitHub did not retain the requested assignee after one retry",
@@ -788,6 +793,14 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                 return JSONResponse(
                     _request_id_error_content(request, 502, recovery_failure),
                     status_code=502,
+                )
+            if request_id is not None and (
+                issue_created or (issue_write_started and exc.status_code is not None)
+            ):
+                # A definite answer ends this attempt; only a write that may still be
+                # running keeps its lease. Marker recovery stops a second issue.
+                hub.store.expire_request(
+                    actor, "assignment.created", request_id, request_owner
                 )
             if issue_created:
                 failure: dict[str, Any] = {"detail": _bounded_github_error(exc)}
@@ -1129,7 +1142,12 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                     _request_id_error_content(request, 502, reply_failure),
                     status_code=502,
                 )
-            if (
+            if request_id is not None and comment_write_started and exc.status_code is not None:
+                # A definite answer ends this attempt; marker recovery stops a second comment.
+                hub.store.expire_request(
+                    actor, "assignment.reply", request_id, request_owner
+                )
+            elif (
                 request_id is not None
                 and not getattr(request.state, "request_id_prior_write", False)
                 and (not comment_write_started or exc.status_code is not None)
