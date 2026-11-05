@@ -91,24 +91,27 @@ def test_store_migrates_columns_without_losing_rows(tmp_path: Path) -> None:
         assert "confirmed_by" in columns
         assert "owner" in reservation_columns
         assert "fingerprint" in reservation_columns
+        assert "prior_write" in reservation_columns
         assert row is not None
         assert row["github_login"] == "alice"
         assert row["confirmed_by"] is None
         assert reservation is not None
         assert reservation["owner"] == ""
         assert reservation["fingerprint"] == ""
+        assert reservation["prior_write"] == 0
     finally:
         store.close()
 
     reopened = Store(str(database))
     try:
         reservation = reopened.query_one(
-            "SELECT owner, fingerprint FROM request_reservation WHERE request_id = ?",
+            "SELECT owner, fingerprint, prior_write FROM request_reservation WHERE request_id = ?",
             ("old-request",),
         )
         assert reservation is not None
         assert reservation["owner"] == ""
         assert reservation["fingerprint"] == ""
+        assert reservation["prior_write"] == 0
     finally:
         reopened.close()
 
@@ -148,6 +151,12 @@ def test_request_reservation_busy_expiry_done_and_release(tmp_path: Path) -> Non
             "2026-11-05T10:02:00Z",
             "2026-11-05T10:04:00Z",
         ) == "taken_over"
+        reservation = store.query_one(
+            "SELECT prior_write FROM request_reservation WHERE request_id = ?",
+            (key[2],),
+        )
+        assert reservation is not None
+        assert reservation["prior_write"] == 1
         assert not store.renew_request(
             *key,
             first_owner,

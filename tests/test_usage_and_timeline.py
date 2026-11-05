@@ -457,6 +457,8 @@ def test_timeline_order_relations_and_visibility(agent_hub: TestClient) -> None:
     for table, relation in (
         ("activity", {"session_id": "timeline-session"}),
         ("task", {"session_id": "timeline-session"}),
+        ("task_round", {"session_id": "timeline-session"}),
+        ("agent", {"task_id": "timeline-task"}),
         ("checklist_item", {"task_id": "timeline-task"}),
         ("local_check", {"task_id": "timeline-task"}),
         ("review_gate", {"task_id": "timeline-task"}),

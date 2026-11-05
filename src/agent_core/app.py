@@ -58,6 +58,7 @@ TIMELINE_ROW_CAP = 5000
 ISSUE_CACHE_SECONDS = 60
 ISSUE_CACHE_MAX_ENTRIES = 500
 ASSIGNMENT_ENRICHMENT_LIMIT = 50
+ASSIGNMENT_ENRICHMENT_SECONDS = 10.0
 REQUEST_LEASE_SECONDS = 120
 GITHUB_REAUTH_DETAIL = "sign in on the website again"
 GITHUB_TOKEN_REQUIRED_DETAIL = "sign in on the website once so the hub holds your GitHub token"
@@ -564,7 +565,12 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                 now,
                 lease_until,
             )
-            if reservation == "taken_over":
+            if (
+                reservation in ("reserved", "taken_over")
+                and hub.store.request_has_prior_write(
+                    actor, "assignment.created", request_id, request_owner
+                )
+            ):
                 request.state.request_id_prior_write = True
             if reservation == "conflict":
                 raise HTTPException(
@@ -623,11 +629,27 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                     request_id,
                     request_owner,
                 )
+                _mark_request_prior_write_or_conflict(
+                    hub,
+                    actor,
+                    "assignment.created",
+                    request_id,
+                    request_owner,
+                )
+                if request_id is not None:
+                    request.state.request_id_prior_write = True
                 issue_write_started = True
                 created = await asyncio.to_thread(
                     hub.github.create_issue, token, repo, title, posted_body, [agent]
                 )
-            if request_id is not None:
+            elif request_id is not None:
+                _mark_request_prior_write_or_conflict(
+                    hub,
+                    actor,
+                    "assignment.created",
+                    request_id,
+                    request_owner,
+                )
                 request.state.request_id_prior_write = True
             issue_created = True
             created_number = created.get("number")
@@ -667,11 +689,19 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                     }),
                     status_code=502,
                 )
-        except HTTPException:
+        except HTTPException as exc:
             if request_id is not None and not issue_write_started:
-                hub.store.release_request(
-                    actor, "assignment.created", request_id, request_owner
-                )
+                if (
+                    exc.detail == GITHUB_TOKEN_REQUIRED_DETAIL
+                    and getattr(request.state, "request_id_prior_write", False)
+                ):
+                    hub.store.expire_request(
+                        actor, "assignment.created", request_id, request_owner
+                    )
+                else:
+                    hub.store.release_request(
+                        actor, "assignment.created", request_id, request_owner
+                    )
             raise
         except GitHubError as exc:
             if exc.status_code == 401:
@@ -682,9 +712,14 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                 if issue_created and number is not None:
                     reauth_failure["number"] = number
                 if request_id is not None:
-                    hub.store.release_request(
-                        actor, "assignment.created", request_id, request_owner
-                    )
+                    if getattr(request.state, "request_id_prior_write", False):
+                        hub.store.expire_request(
+                            actor, "assignment.created", request_id, request_owner
+                        )
+                    else:
+                        hub.store.release_request(
+                            actor, "assignment.created", request_id, request_owner
+                        )
                 return JSONResponse(
                     _request_id_error_content(request, 409, reauth_failure),
                     status_code=409,
@@ -699,8 +734,10 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                     _request_id_error_content(request, 502, failure),
                     status_code=502,
                 )
-            if request_id is not None and (
-                not issue_write_started or exc.status_code is not None
+            if (
+                request_id is not None
+                and not getattr(request.state, "request_id_prior_write", False)
+                and (not issue_write_started or exc.status_code is not None)
             ):
                 hub.store.release_request(
                     actor, "assignment.created", request_id, request_owner
@@ -770,6 +807,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         )
         assignments: list[dict[str, Any]] = []
         enrich = bool(token)
+        enrichment_deadline = time.monotonic() + ASSIGNMENT_ENRICHMENT_SECONDS
         for row in rows:
             payload = loads(row["payload"])
             if (
@@ -790,19 +828,32 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
             number = item.get("number")
             if (
                 enrich
+                and time.monotonic() < enrichment_deadline
                 and len(assignments) < ASSIGNMENT_ENRICHMENT_LIMIT
                 and isinstance(repo, str)
                 and isinstance(number, int)
                 and not isinstance(number, bool)
             ):
                 try:
-                    item.update(_assignment_enrichment(hub, login, token, repo, number))
+                    item.update(
+                        _assignment_enrichment(
+                            hub,
+                            login,
+                            token,
+                            repo,
+                            number,
+                            enrichment_deadline,
+                        )
+                    )
                 except GitHubError as exc:
-                    if exc.status_code != 401:
+                    if exc.status_code == 401:
+                        _forget_github_token(hub, login, token)
+                        token = ""
+                        enrich = False
+                    elif exc.status_code is None:
+                        enrich = False
+                    else:
                         raise
-                    _forget_github_token(hub, login, token)
-                    token = ""
-                    enrich = False
             assignments.append(item)
         _prune_issue_cache(hub)
         return {"agent": wanted, "assignments": assignments}
@@ -847,7 +898,12 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                 now,
                 lease_until,
             )
-            if reservation == "taken_over":
+            if (
+                reservation in ("reserved", "taken_over")
+                and hub.store.request_has_prior_write(
+                    actor, "assignment.reply", request_id, request_owner
+                )
+            ):
                 request.state.request_id_prior_write = True
             if reservation == "conflict":
                 raise HTTPException(
@@ -918,28 +974,59 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                     request_id,
                     request_owner,
                 )
+                _mark_request_prior_write_or_conflict(
+                    hub,
+                    actor,
+                    "assignment.reply",
+                    request_id,
+                    request_owner,
+                )
+                if request_id is not None:
+                    request.state.request_id_prior_write = True
                 comment_write_started = True
                 comment = await asyncio.to_thread(
                     hub.github.create_issue_comment, token, repo, number, posted_body
                 )
-            if request_id is not None:
-                request.state.request_id_prior_write = True
-        except HTTPException:
-            if request_id is not None:
-                hub.store.release_request(
-                    actor, "assignment.reply", request_id, request_owner
+            elif request_id is not None:
+                _mark_request_prior_write_or_conflict(
+                    hub,
+                    actor,
+                    "assignment.reply",
+                    request_id,
+                    request_owner,
                 )
+                request.state.request_id_prior_write = True
+        except HTTPException as exc:
+            if request_id is not None:
+                if (
+                    exc.detail == GITHUB_TOKEN_REQUIRED_DETAIL
+                    and getattr(request.state, "request_id_prior_write", False)
+                ):
+                    hub.store.expire_request(
+                        actor, "assignment.reply", request_id, request_owner
+                    )
+                else:
+                    hub.store.release_request(
+                        actor, "assignment.reply", request_id, request_owner
+                    )
             raise
         except GitHubError as exc:
             if exc.status_code == 401:
                 _forget_github_token(hub, actor, token)
                 if request_id is not None:
-                    hub.store.release_request(
-                        actor, "assignment.reply", request_id, request_owner
-                    )
+                    if getattr(request.state, "request_id_prior_write", False):
+                        hub.store.expire_request(
+                            actor, "assignment.reply", request_id, request_owner
+                        )
+                    else:
+                        hub.store.release_request(
+                            actor, "assignment.reply", request_id, request_owner
+                        )
                 raise HTTPException(status_code=409, detail=GITHUB_REAUTH_DETAIL) from exc
-            if request_id is not None and (
-                not comment_write_started or exc.status_code is not None
+            if (
+                request_id is not None
+                and not getattr(request.state, "request_id_prior_write", False)
+                and (not comment_write_started or exc.status_code is not None)
             ):
                 hub.store.release_request(
                     actor, "assignment.reply", request_id, request_owner
@@ -1566,6 +1653,23 @@ def _renew_request_or_conflict(
     )
 
 
+def _mark_request_prior_write_or_conflict(
+    hub: Hub,
+    actor: str,
+    activity_type: str,
+    request_id: str | None,
+    owner: str,
+) -> None:
+    if request_id is None:
+        return
+    if hub.store.mark_request_prior_write(actor, activity_type, request_id, owner):
+        return
+    raise HTTPException(
+        status_code=409,
+        detail="request is still in progress; retry shortly",
+    )
+
+
 def _request_marker(request_id: str) -> str:
     return f"<!-- agent-core-request:{request_id} -->"
 
@@ -1680,7 +1784,12 @@ def _issue_assignees(issue_row: dict[str, Any]) -> set[str]:
 
 
 def _assignment_enrichment(
-    hub: Hub, viewer: str, token: str, repo: str, number: int
+    hub: Hub,
+    viewer: str,
+    token: str,
+    repo: str,
+    number: int,
+    deadline: float,
 ) -> dict[str, Any]:
     if not token:
         return {"enriched": False}
@@ -1688,11 +1797,15 @@ def _assignment_enrichment(
     cached = hub.issue_cache.get(key)
     if cached is not None and cached[0] > time.monotonic():
         return dict(cached[1])
+    if time.monotonic() >= deadline:
+        return {"enriched": False}
     try:
         issue_row = hub.github.issue(token, repo, number)
+        if time.monotonic() >= deadline:
+            return {"enriched": False}
         raw_comments = hub.github.issue_comments(token, repo, number)
     except GitHubError as exc:
-        if exc.status_code == 401:
+        if exc.status_code in (None, 401):
             raise
         return {"enriched": False}
     comments: list[dict[str, Any]] = []
@@ -1703,11 +1816,17 @@ def _assignment_enrichment(
         author = user.get("login") if isinstance(user, dict) else ""
         body = raw.get("body") if isinstance(raw.get("body"), str) else ""
         created_at = raw.get("created_at") if isinstance(raw.get("created_at"), str) else ""
+        updated_at = (
+            raw.get("updated_at")
+            if isinstance(raw.get("updated_at"), str)
+            else created_at
+        )
         url = raw.get("html_url") if isinstance(raw.get("html_url"), str) else ""
         comments.append(
             {
                 "author": author if isinstance(author, str) else "",
                 "created_at": created_at,
+                "updated_at": updated_at,
                 "body": body[:4000],
                 "url": url,
             }
@@ -1715,7 +1834,7 @@ def _assignment_enrichment(
     # GitHub returns comments oldest first. Reversing first makes the stable sort
     # put the later GitHub comment first among equal timestamps.
     comments.reverse()
-    comments.sort(key=lambda row: row["created_at"], reverse=True)
+    comments.sort(key=lambda row: row["updated_at"], reverse=True)
     result = {
         "enriched": True,
         "state": issue_row.get("state") if isinstance(issue_row.get("state"), str) else "",
@@ -2010,10 +2129,7 @@ def _session_timeline(hub: Hub, session_row: Any, allowed: set[str]) -> list[dic
         payload = loads(row["payload"])
         if not isinstance(payload, dict):
             continue
-        if (
-            row["table_name"] in ("checklist_item", "local_check", "review_gate")
-            and not _timeline_row_matches_session_login(row, session_login)
-        ):
+        if not _timeline_row_matches_session_login(row, session_login):
             continue
         task_id = _payload_relation(payload, "task_id")
         if _payload_relation(payload, "session_id") == session_id or (task_id != "" and task_id in task_ids):

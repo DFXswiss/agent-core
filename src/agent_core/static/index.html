@@ -1260,7 +1260,7 @@
           if (sessionEpoch !== agentSessionEpoch || login !== window.__login) return;
           expireAssignmentLoad(form.dataset.agent);
           document.querySelectorAll("#agents-list .reply-form").forEach(current => {
-            if (agentFormKey(current) === formKey) current.reset();
+            if (current !== form && agentFormKey(current) === formKey) current.reset();
           });
           await repaintAgents();
         }

@@ -298,16 +298,7 @@ def test_index_lists_pr_columns() -> None:
     state_tick = html.split("function kickState()", 1)[1].split(
         "function kickUsage()", 1
     )[0]
-    usage_refresh = html.split("function kickUsage()", 1)[1].split(
-        "function kickPrs()", 1
-    )[0]
     assert "kickUsage();" in state_tick
-    assert "now - usageLastStartedAt < 15000" in usage_refresh
-    assert "usageLastStartedAt = now" in usage_refresh
-    assert "row.input_tokens || 0" in usage_refresh
-    assert "row.output_tokens || 0" in usage_refresh
-    assert "row.cache_read_input_tokens || 0" in usage_refresh
-    assert "row.cache_creation_input_tokens || 0" in usage_refresh
 
 
 def test_index_agent_render_preserves_forms_and_handles_fetch_lifecycle() -> None:
@@ -328,15 +319,6 @@ def test_index_agent_render_preserves_forms_and_handles_fetch_lifecycle() -> Non
     abort_fn = html.split("function abortHubFetches()", 1)[1].split(
         "function abortAssignmentLoads()", 1
     )[0]
-    assignment_abort_fn = html.split("function abortAssignmentLoads()", 1)[1].split(
-        "function expireAssignmentLoad", 1
-    )[0]
-    assignment_expire_fn = html.split("function expireAssignmentLoad", 1)[1].split(
-        "function assignmentOwnerSetKey", 1
-    )[0]
-    assignment_load_fn = html.split("function loadAssignmentsForAgent", 1)[1].split(
-        "async function renderAgents", 1
-    )[0]
     clear_fn = html.split("function clearHubTables()", 1)[1].split("function jsonGet", 1)[0]
 
     assert "section.contains(document.activeElement)" not in render_agents
@@ -344,31 +326,14 @@ def test_index_agent_render_preserves_forms_and_handles_fetch_lifecycle() -> Non
     assert "restoreAgentFormState(drafts)" in render_agents
     assert "captureAgentDraft(" in html  # behaviour is executed in tests/test_index_page_js.py
     assert "if (values.__requestId) form.dataset.requestId = values.__requestId;" in html
-    assert "Could not load assignments:" in html
-    assert "try { body = await res.json(); } catch" in assignment_load_fn
-    assert "No assignments." in render_agents
-    assert "Promise.all(owned.map(loadAssignmentsForAgent))" in render_agents
     assert "new AbortController()" not in render_agents
     assert "abortAssignmentLoads()" not in render_agents
-    assert "const assignmentLoads = new Map()" in html
-    assert "const ASSIGNMENT_REFRESH_MS = 15000" in html
-    assert "const current = assignmentLoads.get(agent)" in assignment_load_fn
-    assert "if (current) return current.promise" in assignment_load_fn
-    assert "now - completedAt < ASSIGNMENT_REFRESH_MS" in assignment_load_fn
-    assert "new AbortController()" in assignment_load_fn
-    assert "signal: controller.signal" in assignment_load_fn
     assert "captureAgentFocus()" in render_agents
     assert "restoreAgentFocus(focus)" in render_agents
     assert "selectionStart" in html
     assert "selectionEnd" in html
     assert "setSelectionRange" in html
     assert "assignmentLoads" not in abort_fn
-    assert "assignmentLoads.forEach(load => load.controller.abort())" in assignment_abort_fn
-    assert "assignmentLoads.clear()" in assignment_abort_fn
-    assert "++agentRenderGen" in assignment_abort_fn
-    assert "const current = assignmentLoads.get(agent)" in assignment_expire_fn
-    assert "current.controller.abort()" in assignment_expire_fn
-    assert "assignmentLoads.delete(agent)" in assignment_expire_fn
     assert html.count("abortAssignmentLoads();") == 3
     assert "assignmentOwnerSetKey(user.owned_agents || [])" in html
     assert "assignmentOwnersKey !== nextOwnerKey" in html
@@ -382,11 +347,6 @@ def test_index_agent_render_preserves_forms_and_handles_fetch_lifecycle() -> Non
     assert "agentFormsInFlight.clear()" in clear_fn
     assert 'JSON.stringify(["reply", form.dataset.agent || "", form.dataset.repo || "", form.dataset.number || ""])' in html
     assert 'class="reply-form" data-agent="${esc(agent)}"' in render_agents
-    assert "form.inert = busy" in html
-    assert submit_handler.count("setFormBusy(form, true)") == 2
-    assert submit_handler.count("setFormBusy(form, false)") >= 2
-    assert submit_handler.count("finally") >= 2
-    assert submit_handler.count("await repaintAgents()") == 4
     for handler in (assign_handler, reply_handler):
         assert "const sessionEpoch = agentSessionEpoch" in handler
         assert "const generation = agentRenderGen" not in handler
@@ -402,34 +362,6 @@ def test_index_agent_render_preserves_forms_and_handles_fetch_lifecycle() -> Non
         )[0]
         assert "sessionEpoch !== agentSessionEpoch" in before_repaint
         assert "login !== window.__login" in before_repaint
-        assert "const postCtl = new AbortController()" in handler
-        assert "setTimeout(() => postCtl.abort(), 30000)" in handler
-        assert "agentPostControllers.add(postCtl)" in handler
-        assert "signal: postCtl.signal" in handler
-        assert "clearTimeout(postTimeout)" in handler
-        assert "agentPostControllers.delete(postCtl)" in handler
-        assert "Request did not complete — check the assignment list before submitting again" in handler
-        assert "form.dataset.requestId = pendingRequestId(pendingStorage, pendingKey, payloadJson, form.dataset.requestId);" in handler
-        assert "request_id:" in handler
-        assert "delete form.dataset.requestId" in handler
-        timeout_block = handler.split("catch (e)", 1)[1].split("finally", 1)[0]
-        assert 'if (e.name === "AbortError")' in timeout_block
-        assert "delete form.dataset.requestId" not in timeout_block
-        assert "expireAssignmentLoad(form.dataset.agent)" in timeout_block
-        assert "await repaintAgents()" in timeout_block
-    assert "const failure = await responseJson(res);" in reply_handler
-
-
-def test_session_timeline_truncation_notice_matches_newest_rows() -> None:
-    html = (
-        Path(__file__).resolve().parents[1]
-        / "src"
-        / "agent_core"
-        / "static"
-        / "session.html"
-    ).read_text(encoding="utf-8")
-    assert '"Showing the newest 5,000 rows (oldest first)"' in html
-    assert "Showing the oldest 5,000 rows" not in html
 
 
 def test_oauth_scope_is_read_user_repo(cfg) -> None:

@@ -102,7 +102,7 @@ class Store:
             "CREATE TABLE IF NOT EXISTS request_reservation ("
             "actor TEXT, activity_type TEXT, request_id TEXT, status TEXT NOT NULL, "
             "lease_until TEXT NOT NULL, owner TEXT NOT NULL DEFAULT '', "
-            "fingerprint TEXT NOT NULL DEFAULT '', "
+            "fingerprint TEXT NOT NULL DEFAULT '', prior_write INTEGER NOT NULL DEFAULT 0, "
             "PRIMARY KEY (actor, activity_type, request_id))"
         )
         columns = {
@@ -115,6 +115,10 @@ class Store:
         if "fingerprint" not in columns:
             self._conn.execute(
                 "ALTER TABLE request_reservation ADD COLUMN fingerprint TEXT NOT NULL DEFAULT ''"
+            )
+        if "prior_write" not in columns:
+            self._conn.execute(
+                "ALTER TABLE request_reservation ADD COLUMN prior_write INTEGER NOT NULL DEFAULT 0"
             )
 
     def close(self) -> None:
@@ -191,7 +195,7 @@ class Store:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
                 row = self._conn.execute(
-                    "SELECT status, lease_until, fingerprint FROM request_reservation "
+                    "SELECT status, lease_until, fingerprint, prior_write FROM request_reservation "
                     "WHERE actor = ? AND activity_type = ? AND request_id = ?",
                     (actor, activity_type, request_id),
                 ).fetchone()
@@ -218,7 +222,7 @@ class Store:
                     result = "busy"
                 else:
                     self._conn.execute(
-                        "UPDATE request_reservation SET lease_until = ?, owner = ? "
+                        "UPDATE request_reservation SET lease_until = ?, owner = ?, prior_write = 1 "
                         "WHERE actor = ? AND activity_type = ? AND request_id = ?",
                         (lease_until, owner, actor, activity_type, request_id),
                     )
@@ -228,6 +232,17 @@ class Store:
             except Exception:
                 self._conn.rollback()
                 raise
+
+    def request_has_prior_write(
+        self, actor: str, activity_type: str, request_id: str, owner: str
+    ) -> bool:
+        row = self.query_one(
+            "SELECT prior_write FROM request_reservation "
+            "WHERE actor = ? AND activity_type = ? AND request_id = ? "
+            "AND status = 'pending' AND owner = ?",
+            (actor, activity_type, request_id, owner),
+        )
+        return row is not None and row["prior_write"] == 1
 
     def renew_request(
         self,
@@ -243,6 +258,28 @@ class Store:
             "WHERE actor = ? AND activity_type = ? AND request_id = ? "
             "AND status = 'pending' AND owner = ? AND lease_until > ?",
             (lease_until, actor, activity_type, request_id, owner, now),
+        )
+        return updated.rowcount == 1
+
+    def mark_request_prior_write(
+        self, actor: str, activity_type: str, request_id: str, owner: str
+    ) -> bool:
+        updated = self.execute(
+            "UPDATE request_reservation SET prior_write = 1 "
+            "WHERE actor = ? AND activity_type = ? AND request_id = ? "
+            "AND status = 'pending' AND owner = ?",
+            (actor, activity_type, request_id, owner),
+        )
+        return updated.rowcount == 1
+
+    def expire_request(
+        self, actor: str, activity_type: str, request_id: str, owner: str
+    ) -> bool:
+        updated = self.execute(
+            "UPDATE request_reservation SET lease_until = '', prior_write = 1 "
+            "WHERE actor = ? AND activity_type = ? AND request_id = ? "
+            "AND status = 'pending' AND owner = ?",
+            (actor, activity_type, request_id, owner),
         )
         return updated.rowcount == 1
 

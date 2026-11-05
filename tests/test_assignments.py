@@ -465,6 +465,12 @@ def test_assignment_create_takeover_reauth_recovers_issue_after_timeout(
     payload = dict(ASSIGNMENT, request_id=REQUEST_ID)
     failed = agent_hub.post("/api/assignments", json=payload)
     monkeypatch.setattr(github, "create_issue", create_issue)
+    possible_write = agent_hub.app.state.hub.store.query_one(
+        "SELECT prior_write FROM request_reservation WHERE request_id = ?",
+        (REQUEST_ID,),
+    )
+    assert possible_write is not None
+    assert possible_write["prior_write"] == 1
     agent_hub.app.state.hub.store.execute(
         "UPDATE request_reservation SET lease_until = ? WHERE request_id = ?",
         ("2000-01-01T00:00:00Z", REQUEST_ID),
@@ -476,6 +482,12 @@ def test_assignment_create_takeover_reauth_recovers_issue_after_timeout(
 
     monkeypatch.setattr(github, "recent_issues_by_creator", expired_token)
     reauth = agent_hub.post("/api/assignments", json=payload)
+    without_token = agent_hub.post("/api/assignments", json=payload)
+    pending_reservation = agent_hub.app.state.hub.store.query_one(
+        "SELECT status, lease_until, prior_write FROM request_reservation "
+        "WHERE request_id = ?",
+        (REQUEST_ID,),
+    )
     monkeypatch.setattr(github, "recent_issues_by_creator", recent_issues)
     sign_in(agent_hub, "code-alice")
     recovered = agent_hub.post("/api/assignments", json=payload)
@@ -485,6 +497,17 @@ def test_assignment_create_takeover_reauth_recovers_issue_after_timeout(
     assert reauth.json() == {
         "detail": "sign in on the website again",
         "request_id_final": False,
+    }
+    assert without_token.status_code == 409
+    assert without_token.json() == {
+        "detail": "sign in on the website once so the hub holds your GitHub token",
+        "request_id_final": False,
+    }
+    assert pending_reservation is not None
+    assert dict(pending_reservation) == {
+        "status": "pending",
+        "lease_until": "",
+        "prior_write": 1,
     }
     assert recovered.status_code == 201
     assert recovered.json()["number"] == 1
@@ -578,6 +601,12 @@ def test_assignment_reply_takeover_reauth_recovers_comment_after_timeout(
     payload = {"body": "A reply.", "request_id": REQUEST_ID}
     failed = agent_hub.post("/api/assignments/Acme/Widget/1/comments", json=payload)
     monkeypatch.setattr(github, "create_issue_comment", create_comment)
+    possible_write = agent_hub.app.state.hub.store.query_one(
+        "SELECT prior_write FROM request_reservation WHERE request_id = ?",
+        (REQUEST_ID,),
+    )
+    assert possible_write is not None
+    assert possible_write["prior_write"] == 1
     agent_hub.app.state.hub.store.execute(
         "UPDATE request_reservation SET lease_until = ? WHERE request_id = ?",
         ("2000-01-01T00:00:00Z", REQUEST_ID),
@@ -591,6 +620,14 @@ def test_assignment_reply_takeover_reauth_recovers_comment_after_timeout(
     reauth = agent_hub.post(
         "/api/assignments/Acme/Widget/1/comments", json=payload
     )
+    without_token = agent_hub.post(
+        "/api/assignments/Acme/Widget/1/comments", json=payload
+    )
+    pending_reservation = agent_hub.app.state.hub.store.query_one(
+        "SELECT status, lease_until, prior_write FROM request_reservation "
+        "WHERE request_id = ?",
+        (REQUEST_ID,),
+    )
     monkeypatch.setattr(github, "issue", issue)
     sign_in(agent_hub, "code-alice")
     recovered = agent_hub.post("/api/assignments/Acme/Widget/1/comments", json=payload)
@@ -600,6 +637,17 @@ def test_assignment_reply_takeover_reauth_recovers_comment_after_timeout(
     assert reauth.json() == {
         "detail": "sign in on the website again",
         "request_id_final": False,
+    }
+    assert without_token.status_code == 409
+    assert without_token.json() == {
+        "detail": "sign in on the website once so the hub holds your GitHub token",
+        "request_id_final": False,
+    }
+    assert pending_reservation is not None
+    assert dict(pending_reservation) == {
+        "status": "pending",
+        "lease_until": "",
+        "prior_write": 1,
     }
     assert recovered.status_code == 201
     assert len(
@@ -1253,9 +1301,11 @@ def test_assignment_create_handles_github_auth_status(
 
     assert response.status_code == response_status
     if github_status == 401:
+        # The write had started, so the id stays retryable: a retry after sign-in
+        # finds no marker and creates the issue once.
         assert response.json() == {
             "detail": "sign in on the website again",
-            "request_id_final": True,
+            "request_id_final": False,
         }
     else:
         assert "HTTP 403" in response.json()["detail"]
@@ -1627,6 +1677,7 @@ def test_assignment_comment_body_cut_has_4000_character_boundary(
     assert comments[0] == {
         "author": "helperbot",
         "created_at": "2026-11-05T10:01:00Z",
+        "updated_at": "2026-11-05T10:01:00Z",
         "body": "b" * 4000,
         "url": "https://github.test/Acme/Widget/issues/1#issuecomment-2",
     }
@@ -1657,6 +1708,39 @@ def test_assignment_comments_with_equal_timestamps_keep_github_order_newest_firs
         "comment-1",
         "comment-0",
     ]
+
+
+def test_assignment_comments_use_latest_change_with_github_order_tiebreak(
+    agent_hub: TestClient,
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    assert agent_hub.post("/api/assignments", json=ASSIGNMENT).status_code == 201
+    github: FakeGitHub = agent_hub.app.state.hub.github
+    github.comments[("Acme/Widget", 1)] = [
+        {
+            "html_url": f"https://github.test/Acme/Widget/issues/1#issuecomment-{index}",
+            "user": {"login": "helperbot"},
+            "created_at": created_at,
+            "updated_at": updated_at,
+            "body": body,
+        }
+        for index, created_at, updated_at, body in (
+            (1, "2026-11-05T09:00:00Z", "2026-11-05T12:00:00Z", "edited older"),
+            (2, "2026-11-05T10:00:00Z", "2026-11-05T11:00:00Z", "tie first"),
+            (3, "2026-11-05T10:01:00Z", "2026-11-05T11:00:00Z", "tie second"),
+        )
+    ]
+
+    response = agent_hub.get("/api/assignments", params={"agent": "helperbot"})
+
+    assert response.status_code == 200
+    comments = response.json()["assignments"][0]["comments"]
+    assert [comment["body"] for comment in comments] == [
+        "edited older",
+        "tie second",
+        "tie first",
+    ]
+    assert comments[0]["updated_at"] == "2026-11-05T12:00:00Z"
 
 
 def test_assignment_list_enriches_only_newest_50(agent_hub: TestClient) -> None:
@@ -1755,6 +1839,116 @@ def test_assignment_list_stops_enrichment_and_drops_expired_token(
     assert calls == 1
     assert hub.store.get_oauth_token("alice") == ""
     assert "alice" not in hub.github_tokens
+
+
+def test_assignment_list_stops_enrichment_after_transport_error(
+    agent_hub: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    assert agent_hub.post("/api/assignments", json=ASSIGNMENT).status_code == 201
+    hub = agent_hub.app.state.hub
+    hub.store.execute(
+        "INSERT INTO row_replica (table_name, row_id, origin_device_id, github_login, payload, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            "activity",
+            "transport-assignment",
+            "web:alice",
+            "alice",
+            dumps(
+                {
+                    "id": "transport-assignment",
+                    "type": "assignment.created",
+                    "payload": {
+                        "agent": "helperbot",
+                        "actor": "alice",
+                        "repo": "Acme/Widget",
+                        "number": 1,
+                    },
+                }
+            ),
+            "2099-01-01T00:00:00Z",
+        ),
+    )
+    calls = 0
+
+    def transport_error(*_args: object, **_kwargs: object) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        raise GitHubError("GitHub request failed: connection reset")
+
+    monkeypatch.setattr(hub.github, "issue", transport_error)
+    response = agent_hub.get("/api/assignments", params={"agent": "helperbot"})
+
+    assert response.status_code == 200
+    assert all(not row["enriched"] for row in response.json()["assignments"])
+    assert calls == 1
+    assert hub.store.get_oauth_token("alice") == "tok-alice"
+
+
+def test_assignment_list_stops_enrichment_when_budget_is_spent(
+    agent_hub: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    assert agent_hub.post("/api/assignments", json=ASSIGNMENT).status_code == 201
+    hub = agent_hub.app.state.hub
+    hub.store.execute(
+        "INSERT INTO row_replica (table_name, row_id, origin_device_id, github_login, payload, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            "activity",
+            "slow-assignment",
+            "web:alice",
+            "alice",
+            dumps(
+                {
+                    "id": "slow-assignment",
+                    "type": "assignment.created",
+                    "payload": {
+                        "agent": "helperbot",
+                        "actor": "alice",
+                        "repo": "Acme/Widget",
+                        "number": 1,
+                    },
+                }
+            ),
+            "2099-01-01T00:00:00Z",
+        ),
+    )
+    clock = [0.0]
+    issue = hub.github.issue
+    issue_calls_before = len(
+        [call for call in hub.github.issue_calls if call["operation"] == "issue"]
+    )
+    comment_calls_before = len(
+        [
+            call
+            for call in hub.github.issue_calls
+            if call["operation"] == "issue_comments"
+        ]
+    )
+
+    def slow_issue(*args: object, **kwargs: object) -> dict[str, object]:
+        result = issue(*args, **kwargs)
+        clock[0] = app_module.ASSIGNMENT_ENRICHMENT_SECONDS + 1
+        return result
+
+    monkeypatch.setattr(app_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(hub.github, "issue", slow_issue)
+    response = agent_hub.get("/api/assignments", params={"agent": "helperbot"})
+
+    assert response.status_code == 200
+    assert all(not row["enriched"] for row in response.json()["assignments"])
+    assert len(
+        [call for call in hub.github.issue_calls if call["operation"] == "issue"]
+    ) == issue_calls_before + 1
+    assert len(
+        [
+            call
+            for call in hub.github.issue_calls
+            if call["operation"] == "issue_comments"
+        ]
+    ) == comment_calls_before
 
 
 def test_assignment_list_keeps_token_when_enrichment_is_forbidden(
