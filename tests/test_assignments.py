@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 import agent_core.app as app_module
 from agent_core.db import dumps
-from agent_core.github import FakeGitHub, RealGitHub
+from agent_core.github import FakeGitHub, GitHubError, RealGitHub
 from tests.conftest import pair_device, sign_in
 from tests.test_agent_pair_control import _pair_as
 
@@ -30,6 +30,21 @@ class _Response:
 
     def json(self) -> object:
         return self._body
+
+
+def test_real_github_error_exposes_http_status(
+    cfg, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        httpx,
+        "request",
+        lambda *_args, **_kwargs: _Response(401, {"message": "Bad credentials"}),
+    )
+
+    with pytest.raises(GitHubError) as raised:
+        RealGitHub(cfg).issue("expired-token", "Acme/Widget", 1)
+
+    assert raised.value.status_code == 401
 
 
 def test_owner_creates_assignment_and_web_activity(agent_hub: TestClient) -> None:
@@ -119,6 +134,58 @@ def test_assignment_authorization_and_missing_token(agent_hub: TestClient) -> No
     )
     assert missing.status_code == 409
     assert "sign in on the website once" in missing.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    ("github_status", "response_status", "token_retained"),
+    ((401, 409, False), (403, 502, True)),
+)
+def test_assignment_create_handles_github_auth_status(
+    agent_hub: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    github_status: int,
+    response_status: int,
+    token_retained: bool,
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    hub = agent_hub.app.state.hub
+
+    def reject(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise GitHubError(
+            f"GitHub request failed: HTTP {github_status}", status_code=github_status
+        )
+
+    monkeypatch.setattr(hub.github, "create_issue", reject)
+    response = agent_hub.post("/api/assignments", json=ASSIGNMENT)
+
+    assert response.status_code == response_status
+    if github_status == 401:
+        assert response.json() == {"detail": "sign in on the website again"}
+    else:
+        assert "HTTP 403" in response.json()["detail"]
+    assert hub.store.get_oauth_token("alice") == ("tok-alice" if token_retained else "")
+    assert (hub.github_tokens.get("alice") == "tok-alice") is token_retained
+
+
+def test_assignment_reply_expired_token_asks_reauth(
+    agent_hub: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    assert agent_hub.post("/api/assignments", json=ASSIGNMENT).status_code == 201
+    hub = agent_hub.app.state.hub
+
+    def expired(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise GitHubError("GitHub request failed: HTTP 401", status_code=401)
+
+    monkeypatch.setattr(hub.github, "issue", expired)
+    response = agent_hub.post(
+        "/api/assignments/Acme/Widget/1/comments", json={"body": "A reply."}
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "sign in on the website again"}
+    assert hub.store.get_oauth_token("alice") == ""
+    assert "alice" not in hub.github_tokens
 
 
 def test_assignment_retries_missing_assignee_then_returns_issue_url(agent_hub: TestClient) -> None:
@@ -245,6 +312,7 @@ def test_assignment_list_comments_and_reply_authorization(agent_hub: TestClient)
     assert reply_call["token"] == "tok-alice"
     state = agent_hub.get("/api/state").json()
     reply = next(row for row in state["activity"] if row.get("type") == "assignment.reply")
+    assert reply["payload"]["agent"] == "helperbot"
     assert reply["payload"]["issue_key"] == "Acme/Widget#1"
     assert reply["payload"]["url"] == "https://github.com/Acme/Widget/issues/1"
     replica = agent_hub.app.state.hub.store.query_one(
@@ -408,6 +476,54 @@ def test_assignment_list_enriches_only_newest_50(agent_hub: TestClient) -> None:
         len([call for call in github.issue_calls if call["operation"] == "issue_comments"])
         == 50
     )
+
+
+def test_assignment_list_stops_enrichment_and_drops_expired_token(
+    agent_hub: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    assert agent_hub.post("/api/assignments", json=ASSIGNMENT).status_code == 201
+    hub = agent_hub.app.state.hub
+    hub.store.execute(
+        "INSERT INTO row_replica (table_name, row_id, origin_device_id, github_login, payload, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            "activity",
+            "second-assignment",
+            "web:alice",
+            "alice",
+            dumps(
+                {
+                    "id": "second-assignment",
+                    "type": "assignment.created",
+                    "payload": {
+                        "agent": "helperbot",
+                        "actor": "alice",
+                        "repo": "Acme/Widget",
+                        "number": 1,
+                        "title": "Second mandate",
+                    },
+                }
+            ),
+            "2099-01-01T00:00:00Z",
+        ),
+    )
+    calls = 0
+
+    def expired(*_args: object, **_kwargs: object) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        raise GitHubError("GitHub request failed: HTTP 401", status_code=401)
+
+    monkeypatch.setattr(hub.github, "issue", expired)
+    response = agent_hub.get("/api/assignments", params={"agent": "helperbot"})
+
+    assert response.status_code == 200
+    assert len(response.json()["assignments"]) == 2
+    assert all(not row["enriched"] for row in response.json()["assignments"])
+    assert calls == 1
+    assert hub.store.get_oauth_token("alice") == ""
+    assert "alice" not in hub.github_tokens
 
 
 def test_assignment_list_prunes_and_bounds_issue_cache(agent_hub: TestClient) -> None:

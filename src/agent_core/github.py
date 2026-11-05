@@ -15,7 +15,9 @@ GITHUB_API_URL = "https://api.github.com"
 
 
 class GitHubError(ValueError):
-    pass
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 @dataclass(frozen=True)
@@ -116,7 +118,10 @@ class RealGitHub(GitHub):
             timeout=20.0,
         )
         if token_resp.status_code != 200:
-            raise GitHubError(f"token exchange failed: HTTP {token_resp.status_code}")
+            raise GitHubError(
+                f"token exchange failed: HTTP {token_resp.status_code}",
+                status_code=token_resp.status_code,
+            )
         token_body = token_resp.json()
         access = token_body.get("access_token")
         if not isinstance(access, str) or access == "":
@@ -127,7 +132,10 @@ class RealGitHub(GitHub):
             timeout=20.0,
         )
         if user_resp.status_code != 200:
-            raise GitHubError(f"user lookup failed: HTTP {user_resp.status_code}")
+            raise GitHubError(
+                f"user lookup failed: HTTP {user_resp.status_code}",
+                status_code=user_resp.status_code,
+            )
         login = user_resp.json().get("login")
         if not isinstance(login, str) or login.strip() == "":
             raise GitHubError("user lookup returned no login")
@@ -160,7 +168,9 @@ class RealGitHub(GitHub):
             timeout=20.0,
         )
         if resp.status_code != 200:
-            raise GitHubError(f"PR search failed: HTTP {resp.status_code}")
+            raise GitHubError(
+                f"PR search failed: HTTP {resp.status_code}", status_code=resp.status_code
+            )
         body = resp.json()
         items = body.get("items") if isinstance(body, dict) else None
         if not isinstance(items, list):
@@ -233,11 +243,17 @@ class RealGitHub(GitHub):
                     message = ": " + raw_message[:500]
             except Exception:
                 pass
-            raise GitHubError(f"GitHub request failed: HTTP {resp.status_code}{message}")
+            raise GitHubError(
+                f"GitHub request failed: HTTP {resp.status_code}{message}",
+                status_code=resp.status_code,
+            )
         try:
             result = resp.json()
         except Exception as exc:
-            raise GitHubError(f"GitHub request failed: HTTP {resp.status_code} returned invalid JSON") from exc
+            raise GitHubError(
+                f"GitHub request failed: HTTP {resp.status_code} returned invalid JSON",
+                status_code=resp.status_code,
+            ) from exc
         raw_headers = getattr(resp, "headers", {})
         headers = {str(key).lower(): str(value) for key, value in raw_headers.items()}
         return result, headers
@@ -373,7 +389,9 @@ class FakeGitHub(GitHub):
 
     def search_open_prs(self, token: str, logins: list[str]) -> list[dict[str, Any]]:
         if self.search_status in (401, 403):
-            raise GitHubError(f"PR search failed: HTTP {self.search_status}")
+            raise GitHubError(
+                f"PR search failed: HTTP {self.search_status}", status_code=self.search_status
+            )
         if token == "" or not token.startswith("tok-"):
             return []
         allowed = {m.strip().lower() for m in logins}
@@ -424,7 +442,7 @@ class FakeGitHub(GitHub):
         canonical_repo = self.canonical_repos.get(repo.lower(), repo)
         issue = self.issues.get((canonical_repo, number))
         if issue is None:
-            raise GitHubError("GitHub request failed: HTTP 404: Not Found")
+            raise GitHubError("GitHub request failed: HTTP 404: Not Found", status_code=404)
         return dict(issue)
 
     def add_assignees(self, token: str, repo: str, number: int, assignees: list[str]) -> dict[str, Any]:
@@ -440,7 +458,7 @@ class FakeGitHub(GitHub):
         canonical_repo = self.canonical_repos.get(repo.lower(), repo)
         issue = self.issues.get((canonical_repo, number))
         if issue is None:
-            raise GitHubError("GitHub request failed: HTTP 404: Not Found")
+            raise GitHubError("GitHub request failed: HTTP 404: Not Found", status_code=404)
         if not self.omit_assignees_after_add:
             issue["assignees"] = [{"login": a} for a in assignees]
         return dict(issue)
@@ -448,7 +466,7 @@ class FakeGitHub(GitHub):
     def create_issue_comment(self, token: str, repo: str, number: int, body: str) -> dict[str, Any]:
         canonical_repo = self.canonical_repos.get(repo.lower(), repo)
         if (canonical_repo, number) not in self.issues:
-            raise GitHubError("GitHub request failed: HTTP 404: Not Found")
+            raise GitHubError("GitHub request failed: HTTP 404: Not Found", status_code=404)
         author = token.removeprefix("tok-") if token.startswith("tok-") else "unknown"
         comment_number = len(self.comments.get((canonical_repo, number), [])) + 1
         comment = {

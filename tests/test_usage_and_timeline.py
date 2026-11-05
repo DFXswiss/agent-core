@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
 from agent_core.db import dumps
@@ -185,7 +187,42 @@ def test_timeline_order_relations_and_visibility(agent_hub: TestClient) -> None:
         row_id="timeline-lane",
         updated_at="2026-11-04T10:01:00Z",
         login="helperbot",
-        payload={"id": "timeline-lane", "type": "lane.run", "session_id": "timeline-session", "ran_at": "2026-11-04T10:01:00Z"},
+        payload={
+            "id": "timeline-lane",
+            "type": "lane.run",
+            "session_id": "timeline-session",
+            "ran_at": "2026-11-04T10:01:00Z",
+            "payload": {
+                "role": "reviewer",
+                "vendor": "codex",
+                "model": "gpt-test",
+                "status": "ok",
+                "usage": {"input_tokens": 12, "output_tokens": 3},
+                "tools": [
+                    {"tool": "Read", "target": "src/agent_core/app.py", "error": False}
+                ],
+                "tools_truncated": True,
+            },
+        },
+    )
+    _insert_replica(
+        agent_hub,
+        table="activity",
+        row_id="timeline-assignment-created",
+        updated_at="2026-11-04T10:01:30Z",
+        login="alice",
+        origin="web:alice",
+        payload={
+            "id": "timeline-assignment-created",
+            "type": "assignment.created",
+            "created_at": "2026-11-04T10:01:30Z",
+            "payload": {
+                "agent": "helperbot",
+                "repo": "Acme/Widget",
+                "number": 12,
+                "url": "https://github.com/Acme/Widget/issues/12",
+            },
+        },
     )
     _insert_replica(
         agent_hub,
@@ -194,6 +231,40 @@ def test_timeline_order_relations_and_visibility(agent_hub: TestClient) -> None:
         updated_at="2026-11-04T10:02:00Z",
         login="helperbot",
         payload={"id": "", "session_id": "timeline-session", "started_at": "2026-11-04T10:02:00Z", "state": "working"},
+    )
+    _insert_replica(
+        agent_hub,
+        table="activity",
+        row_id="timeline-assignment-reply",
+        updated_at="2026-11-04T10:02:30Z",
+        login="alice",
+        origin="web:alice",
+        payload={
+            "id": "timeline-assignment-reply",
+            "type": "assignment.reply",
+            "created_at": "2026-11-04T10:02:30Z",
+            "payload": {
+                "agent": "helperbot",
+                "agents": ["helperbot"],
+                "repo": "Acme/Widget",
+                "number": 12,
+                "url": "https://github.com/Acme/Widget/issues/12#issuecomment-1",
+            },
+        },
+    )
+    _insert_replica(
+        agent_hub,
+        table="activity",
+        row_id="timeline-other-assignment",
+        updated_at="2026-11-04T10:02:45Z",
+        login="alice",
+        origin="web:alice",
+        payload={
+            "id": "timeline-other-assignment",
+            "type": "assignment.created",
+            "created_at": "2026-11-04T10:02:45Z",
+            "payload": {"agent": "someone-else", "repo": "Acme/Other", "number": 1},
+        },
     )
     _insert_replica(
         agent_hub,
@@ -222,8 +293,20 @@ def test_timeline_order_relations_and_visibility(agent_hub: TestClient) -> None:
     response = agent_hub.get("/api/sessions/timeline-session/timeline")
     assert response.status_code == 200
     body = response.json()
-    assert [row["table"] for row in body["timeline"]] == ["session", "activity", "task", "local_check"]
+    assert [row["row_id"] for row in body["timeline"]] == [
+        "timeline-session",
+        "timeline-lane",
+        "timeline-assignment-created",
+        "timeline-task",
+        "timeline-assignment-reply",
+        "timeline-check",
+    ]
     assert [row["at"] for row in body["timeline"]] == sorted(row["at"] for row in body["timeline"])
+    lane = next(row for row in body["timeline"] if row["row_id"] == "timeline-lane")
+    assert lane["payload"]["payload"]["tools"] == [
+        {"tool": "Read", "target": "src/agent_core/app.py", "error": False}
+    ]
+    assert lane["payload"]["payload"]["tools_truncated"] is True
     assert body["truncated"] is False
     assert agent_hub.get("/sessions/timeline-session").status_code == 200
 
@@ -267,3 +350,14 @@ def test_timeline_truncates_at_5000(agent_hub: TestClient) -> None:
     assert body["timeline"][0]["row_id"] == "long-activity-0001"
     assert body["timeline"][-1]["row_id"] == "long-activity-5000"
     assert all(row["table"] != "session" for row in body["timeline"])
+
+
+def test_session_page_reads_real_lane_tool_payload_with_legacy_fallback() -> None:
+    html = (
+        Path(__file__).resolve().parents[1] / "src" / "agent_core" / "static" / "session.html"
+    ).read_text(encoding="utf-8")
+
+    assert "Array.isArray(inner.tools)" in html
+    assert "Array.isArray(inner.tool_calls)" in html
+    assert "inner.tools_truncated" in html
+    assert "Tool list truncated." in html

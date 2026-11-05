@@ -52,6 +52,7 @@ TIMELINE_ROW_CAP = 5000
 ISSUE_CACHE_SECONDS = 60
 ISSUE_CACHE_MAX_ENTRIES = 500
 ASSIGNMENT_ENRICHMENT_LIMIT = 50
+GITHUB_REAUTH_DETAIL = "sign in on the website again"
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 HUB_AUTHORED_ACTIVITY_TYPES = frozenset({"assignment.created", "assignment.reply"})
 _MISSING = object()
@@ -450,15 +451,12 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                 hub.github_tokens[login] = token
         if token == "":
             return {"generated_at": utcnow(), "prs": [], "source": "none"}
-        failed = token
         try:
             prs = hub.github.search_open_prs(token, allowed)
         except GitHubError as exc:
             text = str(exc)
-            if "HTTP 401" in text:
-                hub.store.delete_oauth_token(login, failed)
-                if hub.github_tokens.get(login) == failed:
-                    hub.github_tokens.pop(login, None)
+            if exc.status_code == 401:
+                _forget_github_token(hub, login, token)
                 return {"generated_at": utcnow(), "prs": [], "source": "none"}
             raise HTTPException(status_code=502, detail=text) from exc
         truncated = len(prs) >= 50
@@ -520,6 +518,14 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                     status_code=502,
                 )
         except GitHubError as exc:
+            if exc.status_code == 401:
+                _forget_github_token(hub, actor, token)
+                reauth_failure: dict[str, Any] = {"detail": GITHUB_REAUTH_DETAIL}
+                if issue_created and url:
+                    reauth_failure["url"] = url
+                if issue_created and number is not None:
+                    reauth_failure["number"] = number
+                return JSONResponse(reauth_failure, status_code=409)
             if issue_created:
                 failure: dict[str, Any] = {"detail": _bounded_github_error(exc)}
                 if url:
@@ -572,6 +578,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
             tuple(sorted(hub.visible(login))),
         )
         assignments: list[dict[str, Any]] = []
+        enrich = bool(token)
         for row in rows:
             row_login = row["github_login"]
             if not isinstance(row_login, str) or row["origin_device_id"] != f"web:{row_login}":
@@ -591,12 +598,20 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
             repo = item.get("repo")
             number = item.get("number")
             if (
-                len(assignments) < ASSIGNMENT_ENRICHMENT_LIMIT
+                enrich
+                and len(assignments) < ASSIGNMENT_ENRICHMENT_LIMIT
                 and isinstance(repo, str)
                 and isinstance(number, int)
                 and not isinstance(number, bool)
             ):
-                item.update(_assignment_enrichment(hub, login, token, repo, number))
+                try:
+                    item.update(_assignment_enrichment(hub, login, token, repo, number))
+                except GitHubError as exc:
+                    if exc.status_code != 401:
+                        raise
+                    _forget_github_token(hub, login, token)
+                    token = ""
+                    enrich = False
             assignments.append(item)
         _prune_issue_cache(hub)
         return {"agent": wanted, "assignments": assignments}
@@ -627,6 +642,9 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         except HTTPException:
             raise
         except GitHubError as exc:
+            if exc.status_code == 401:
+                _forget_github_token(hub, actor, token)
+                raise HTTPException(status_code=409, detail=GITHUB_REAUTH_DETAIL) from exc
             raise HTTPException(status_code=502, detail=_bounded_github_error(exc)) from exc
         url = comment.get("html_url")
         if not isinstance(url, str) or not url:
@@ -638,6 +656,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
             "type": "assignment.reply",
             "created_at": utcnow(),
             "payload": {
+                "agent": sorted(assigned_agents)[0],
                 "agents": sorted(assigned_agents),
                 "repo": repo,
                 "issue_key": f"{repo}#{number}",
@@ -1083,6 +1102,12 @@ def _github_token(hub: Hub, login: str) -> str:
     return token
 
 
+def _forget_github_token(hub: Hub, login: str, token: str) -> None:
+    hub.store.delete_oauth_token(login, token)
+    if hub.github_tokens.get(login) == token:
+        hub.github_tokens.pop(login, None)
+
+
 def _optional_github_token(hub: Hub, login: str) -> str:
     token = hub.github_tokens.get(login, "") or hub.store.get_oauth_token(login)
     if token:
@@ -1158,7 +1183,9 @@ def _assignment_enrichment(
     try:
         issue_row = hub.github.issue(token, repo, number)
         raw_comments = hub.github.issue_comments(token, repo, number)
-    except GitHubError:
+    except GitHubError as exc:
+        if exc.status_code == 401:
+            raise
         return {"enriched": False}
     comments: list[dict[str, Any]] = []
     for raw in raw_comments:
@@ -1326,6 +1353,7 @@ def _timeline_item(row: Any, payload: dict[str, Any]) -> dict[str, Any]:
 
 def _session_timeline(hub: Hub, session_row: Any, allowed: set[str]) -> list[dict[str, Any]]:
     session_id = session_row["row_id"]
+    session_login = str(session_row["github_login"]).lower()
     session_payload = loads(session_row["payload"])
     if not isinstance(session_payload, dict):
         session_payload = {}
@@ -1358,7 +1386,24 @@ def _session_timeline(hub: Hub, session_row: Any, allowed: set[str]) -> list[dic
         if not isinstance(payload, dict):
             continue
         task_id = _payload_relation(payload, "task_id")
-        if _payload_relation(payload, "session_id") == session_id or (task_id != "" and task_id in task_ids):
+        inner = payload.get("payload")
+        assignment_for_session = False
+        if payload.get("type") in HUB_AUTHORED_ACTIVITY_TYPES and isinstance(inner, dict):
+            agent = inner.get("agent")
+            agents = inner.get("agents")
+            assignment_for_session = (
+                isinstance(agent, str) and agent.lower() == session_login
+            ) or (
+                isinstance(agents, list)
+                and any(
+                    isinstance(item, str) and item.lower() == session_login for item in agents
+                )
+            )
+        if (
+            _payload_relation(payload, "session_id") == session_id
+            or (task_id != "" and task_id in task_ids)
+            or assignment_for_session
+        ):
             selected.append((row, payload))
     for row in rows:
         if row["table_name"] in ("activity", "task"):
