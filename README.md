@@ -45,11 +45,12 @@ teams:
   dfx:
     members:
       - your-github-login
+      - agent-github-login
 
 agents:
   agent-github-login:
     owners:
-      - owner-github-login
+      - your-github-login
 ```
 
 Logins are compared in lowercase. A login that appears on no team still signs in and still syncs; they only see themselves.

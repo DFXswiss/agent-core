@@ -202,3 +202,13 @@ def test_owned_agents_are_sorted_by_login_not_declaration(tmp_path: Path) -> Non
     roster = load_roster(path)
     assert list(roster.agents) == ["zetabot", "alphabot"]
     assert roster.owned_agents("Alice") == ["alphabot", "zetabot"]
+
+
+def test_readme_roster_sample_loads(tmp_path: Path) -> None:
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
+    start = readme.index("```yaml\nteams:")
+    sample = readme[start + len("```yaml\n") : readme.index("```", start + 7)]
+    path = tmp_path / "teams.yaml"
+    path.write_text(sample, encoding="utf-8")
+    roster = load_roster(path)
+    assert roster.owns_agent("your-github-login", "agent-github-login")
