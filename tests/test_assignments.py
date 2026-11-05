@@ -1792,6 +1792,33 @@ def test_assignment_rejects_created_issue_without_number_or_url(
     )
 
 
+def test_assignment_marks_only_a_lost_assignee_as_assignee_missing(
+    agent_hub: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    hub = agent_hub.app.state.hub
+    github: FakeGitHub = hub.github
+    github.omit_assignees_on_create = True
+    monkeypatch.setattr(github, "add_assignees", lambda *_args, **_kwargs: {"assignees": []})
+
+    lost = agent_hub.post("/api/assignments", json=ASSIGNMENT)
+
+    assert lost.status_code == 502
+    assert lost.json()["assignee_missing"] is True
+    assert lost.json()["url"]
+
+    def fail_verify(*_args, **_kwargs):
+        raise GitHubError("GitHub request failed: HTTP 500", status_code=500)
+
+    monkeypatch.setattr(github, "add_assignees", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError()))
+    github.omit_assignees_on_create = False
+    monkeypatch.setattr(github, "issue", fail_verify)
+    other = agent_hub.post("/api/assignments", json=dict(ASSIGNMENT, title="Another title"))
+
+    assert other.status_code == 502
+    assert "assignee_missing" not in other.json()
+
+
 def test_assignment_rejects_repository_without_canonical_full_name(
     agent_hub: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3297,6 +3324,22 @@ def test_real_github_reads_compressed_responses(cfg, encoding: str) -> None:
 
     assert created["number"] == 7
     assert comments[0]["body"] == "hello"
+
+
+def test_reply_drops_every_viewers_cached_copy_of_the_issue(agent_hub: TestClient) -> None:
+    sign_in(agent_hub, "code-alice")
+    assert agent_hub.post("/api/assignments", json=ASSIGNMENT).status_code == 201
+    hub = agent_hub.app.state.hub
+    hub.issue_cache[("bob", "acme/widget", 1)] = (time.monotonic() + 60, {"enriched": True})
+    hub.issue_cache[("carol", "Acme/Widget", 1)] = (time.monotonic() + 60, {"enriched": True})
+    hub.issue_cache[("carol", "Acme/Widget", 2)] = (time.monotonic() + 60, {"enriched": True})
+
+    response = agent_hub.post(
+        "/api/assignments/Acme/Widget/1/comments", json={"body": "A reply."}
+    )
+
+    assert response.status_code == 201
+    assert set(hub.issue_cache) == {("carol", "Acme/Widget", 2)}
 
 
 def test_assignment_github_calls_use_to_thread(

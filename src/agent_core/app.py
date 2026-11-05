@@ -727,6 +727,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                         "detail": "GitHub did not retain the requested assignee after one retry",
                         "url": url,
                         "number": number,
+                        "assignee_missing": True,
                     }),
                     status_code=502,
                 )
@@ -1151,8 +1152,8 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
             _record_web_event(
                 hub, actor, "activity", "insert", activity_id, event_payload
             )
-        hub.issue_cache.pop((actor, repo, number), None)
-        hub.issue_cache.pop((actor, path_repo, path_number), None)
+        _forget_cached_issue(hub, repo, number)
+        _forget_cached_issue(hub, path_repo, path_number)
         await hub.publish({"type": "events", "login": actor, "count": 1})
         return JSONResponse({"url": url}, status_code=201)
 
@@ -1968,6 +1969,15 @@ def _assignment_enrichment(
 def _comment_id(comment: dict[str, Any]) -> int:
     value = comment.get("id")
     return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _forget_cached_issue(hub: Hub, repo: str, number: int) -> None:
+    """Drop every viewer's cached copy of one issue after a reply changed it."""
+    folded = repo.casefold()
+    for key in list(hub.issue_cache):
+        _viewer, cached_repo, cached_number = key
+        if cached_number == number and cached_repo.casefold() == folded:
+            hub.issue_cache.pop(key, None)
 
 
 def _prune_issue_cache(hub: Hub) -> None:

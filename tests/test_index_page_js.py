@@ -75,6 +75,7 @@ def test_assignment_and_reply_submit_handlers_execute_request_lifecycle() -> Non
             "setFormBusy",
             "applyPartialAssignmentLock",
             "partialAssignmentLockUrl",
+            "assignmentFailureText",
             "responseJson",
             "requestIdIsFinal",
         )
@@ -220,7 +221,7 @@ async function submit(form) {
   posts[0].next.resolve({
     ok: false,
     status: 403,
-    json: async () => ({detail: "verification failed", request_id_final: false, url: "https://github.com/Acme/Widget/issues/7"}),
+    json: async () => ({detail: "verification failed", request_id_final: false, assignee_missing: true, url: "https://github.com/Acme/Widget/issues/7"}),
   });
   await firstRun;
   const retryState = {
@@ -424,6 +425,7 @@ def test_agent_card_decisions_and_drafts() -> None:
             "agentDraftFieldValue",
             "restoreAgentDraftField",
             "partialAssignmentLockUrl",
+            "assignmentFailureText",
         )
     )
     script = f"""
@@ -462,10 +464,16 @@ process.stdout.write(JSON.stringify({{
   restoredUnchecked,
   restoredChecked: checkbox.checked,
   lockUrls: [
+    partialAssignmentLockUrl({{url: "https://github.test/issue/1", assignee_missing: true}}),
     partialAssignmentLockUrl({{url: "https://github.test/issue/1"}}),
-    partialAssignmentLockUrl({{url: ""}}),
+    partialAssignmentLockUrl({{url: "", assignee_missing: true}}),
     partialAssignmentLockUrl({{detail: "failed"}}),
     partialAssignmentLockUrl({{url: 7}}),
+  ],
+  failureTexts: [
+    assignmentFailureText({{detail: "sign in on the website again", url: "https://github.test/issue/1"}}),
+    assignmentFailureText({{detail: "failed"}}),
+    assignmentFailureText({{}}),
   ],
 }}));
 """
@@ -500,8 +508,12 @@ process.stdout.write(JSON.stringify({{
     assert out["missing"] == {}
     assert out["checkboxDraft"] is True
     assert out["restoredUnchecked"] is False
-    assert out["restoredChecked"] is True
-    assert out["lockUrls"] == ["https://github.test/issue/1", None, None, None]
+    assert out["lockUrls"] == ["https://github.test/issue/1", None, None, None, None]
+    assert out["failureTexts"] == [
+        "sign in on the website again (https://github.test/issue/1)",
+        "failed",
+        "assignment failed",
+    ]
 
 
 def test_assignment_load_success_errors_timeout_cache_and_invalidation() -> None:
@@ -630,6 +642,7 @@ def test_agent_cards_render_in_owner_and_assignment_order() -> None:
             "sessionLink",
             "agentCardState",
             "agentTaskSummary",
+            "assignmentCommentsHtml",
             "renderAgentCards",
         )
     )
@@ -1014,3 +1027,26 @@ function answer(id) {{
     assert state["streams"] == [
         {"url": "/api/session/terminal?id=session-b", "closed": False}
     ]
+
+
+def test_assignment_comments_say_not_loaded_without_enrichment() -> None:
+    node = shutil.which("node")
+    assert node is not None, "node is required to run the dashboard page test"
+    html = _index_html()
+    functions = "\n".join(_extract(html, name) for name in ("esc", "safeHref", "assignmentCommentsHtml"))
+    script = f"""
+{functions}
+process.stdout.write(JSON.stringify([
+  assignmentCommentsHtml({{enriched: false}}),
+  assignmentCommentsHtml({{}}),
+  assignmentCommentsHtml({{enriched: true, comments: []}}),
+  assignmentCommentsHtml({{enriched: true, comments: [{{author: "alice", created_at: "t", body: "hi", url: "https://github.com/a/b/issues/1#c"}}]}}),
+]));
+"""
+    result = subprocess.run(
+        [node, "-"], input=script, capture_output=True, text=True, check=True, timeout=30
+    )
+    not_loaded, missing, empty, one = json.loads(result.stdout)
+    assert not_loaded == missing == "<li>Comments not loaded.</li>"
+    assert empty == "<li>No comments.</li>"
+    assert "<b>alice</b>" in one and "hi" in one

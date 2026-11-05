@@ -695,7 +695,26 @@
     }
 
     function partialAssignmentLockUrl(failure) {
-      return failure && typeof failure.url === "string" && failure.url ? failure.url : null;
+      // Only a created issue that lost its assignee is final for this form; other
+      // failures with an issue link expect the same request id to be sent again.
+      return failure && failure.assignee_missing === true && typeof failure.url === "string" && failure.url
+        ? failure.url : null;
+    }
+
+    function assignmentCommentsHtml(a) {
+      // Without enrichment the comments were never read, so "No comments." would be wrong.
+      if (!a || a.enriched !== true) return "<li>Comments not loaded.</li>";
+      return (a.comments || []).map(c => {
+        const commentUrl = safeHref(c.url);
+        const heading = `<b>${esc(c.author)}</b> ${esc(c.created_at)}`;
+        return `<li>${commentUrl ? `<a href="${esc(commentUrl)}" target="_blank" rel="noopener">${heading}</a>` : heading}<br>${esc(c.body)}</li>`;
+      }).join("") || "<li>No comments.</li>";
+    }
+
+    function assignmentFailureText(failure) {
+      const detail = (failure && failure.detail) || "assignment failed";
+      return failure && typeof failure.url === "string" && failure.url
+        ? detail + " (" + failure.url + ")" : detail;
     }
 
     function restoreAgentFormState(drafts) {
@@ -796,11 +815,7 @@
           : cardState.kind === "error" || cardState.kind === "timeout"
           ? `<p class="assignment-load-error">${esc(cardState.message)}</p>`
           : assignmentResult.assignments.map(a => {
-          const comments = (a.comments || []).map(c => {
-            const commentUrl = safeHref(c.url);
-            const heading = `<b>${esc(c.author)}</b> ${esc(c.created_at)}`;
-            return `<li>${commentUrl ? `<a href="${esc(commentUrl)}" target="_blank" rel="noopener">${heading}</a>` : heading}<br>${esc(c.body)}</li>`;
-          }).join("") || "<li>No comments.</li>";
+          const comments = assignmentCommentsHtml(a);
           const assignmentUrl = safeHref(a.url);
           const assignmentLabel = `${esc(a.repo)}#${esc(a.number)} — ${esc(a.title)}`;
           return `<div class="assignment">
@@ -1168,7 +1183,7 @@
               applyPartialAssignmentLock(form, formKey, partialUrl);
             } else {
               document.getElementById("action-err").hidden = false;
-              document.getElementById("action-err").textContent = failure.detail || "assignment failed";
+              document.getElementById("action-err").textContent = assignmentFailureText(failure);
             }
             return;
           }
