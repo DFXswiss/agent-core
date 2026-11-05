@@ -765,7 +765,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                     _request_id_error_content(request, 409, reauth_failure),
                     status_code=409,
                 )
-            if request_id is not None and recovering_request and not issue_created:
+            if request_id is not None and recovering_request and not issue_write_started:
                 hub.store.expire_request(
                     actor, "assignment.created", request_id, request_owner
                 )

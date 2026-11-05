@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -57,21 +58,6 @@ def _mark_request_done(
     assert updated.rowcount == 1
 
 
-class _Response:
-    def __init__(self, status_code: int, body: object, headers: dict[str, str] | None = None) -> None:
-        self.status_code = status_code
-        self._body = body
-        self.headers = headers or {}
-
-    def json(self) -> object:
-        return self._body
-
-
-class _InvalidJSONResponse(_Response):
-    def json(self) -> object:
-        raise ValueError("invalid JSON")
-
-
 class _SlowByteStream(httpx.SyncByteStream):
     def __init__(
         self,
@@ -90,11 +76,12 @@ class _SlowByteStream(httpx.SyncByteStream):
 
 
 class _BlockingByteStream(httpx.SyncByteStream):
-    def __init__(self) -> None:
+    def __init__(self, wait_timeout: float = 1.0) -> None:
         self.closed = threading.Event()
+        self._wait_timeout = wait_timeout
 
     def __iter__(self):
-        closed = self.closed.wait(timeout=1.0)
+        closed = self.closed.wait(timeout=self._wait_timeout)
         assert closed, "response body was not closed at its deadline"
         return iter(())
 
@@ -102,34 +89,36 @@ class _BlockingByteStream(httpx.SyncByteStream):
         self.closed.set()
 
 
-def test_real_github_error_exposes_http_status(
-    cfg, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(
-        httpx,
-        "request",
-        lambda *_args, **_kwargs: _Response(401, {"message": "Bad credentials"}),
+def test_real_github_error_exposes_http_status(cfg) -> None:
+    github = RealGitHub(
+        cfg,
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                401, json={"message": "Bad credentials"}, request=request
+            )
+        ),
     )
 
     with pytest.raises(GitHubError) as raised:
-        RealGitHub(cfg).issue("expired-token", "Acme/Widget", 1)
+        github.issue("expired-token", "Acme/Widget", 1)
 
     assert raised.value.status_code == 401
 
 
-def test_real_github_rejects_invalid_json(
-    cfg, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(
-        httpx,
-        "request",
-        lambda *_args, **_kwargs: _InvalidJSONResponse(200, None),
+def test_real_github_rejects_invalid_json(cfg) -> None:
+    github = RealGitHub(
+        cfg,
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200, content=b"invalid JSON", request=request
+            )
+        ),
     )
 
     with pytest.raises(
         GitHubError, match="GitHub request failed: HTTP 200 returned invalid JSON"
     ) as raised:
-        RealGitHub(cfg).issue("tok-alice", "Acme/Widget", 1)
+        github.issue("tok-alice", "Acme/Widget", 1)
 
     assert raised.value.status_code == 200
 
@@ -183,21 +172,21 @@ def test_real_github_rejects_invalid_json(
 )
 def test_real_github_rejects_wrong_response_types(
     cfg,
-    monkeypatch: pytest.MonkeyPatch,
     method: str,
     args: tuple[object, ...],
     status: int,
     body: object,
     message: str,
 ) -> None:
-    monkeypatch.setattr(
-        httpx,
-        "request",
-        lambda *_args, **_kwargs: _Response(status, body),
+    github = RealGitHub(
+        cfg,
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(status, json=body, request=request)
+        ),
     )
 
     with pytest.raises(GitHubError, match=message):
-        getattr(RealGitHub(cfg), method)(*args)
+        getattr(github, method)(*args)
 
 
 def test_owner_creates_assignment_and_web_activity(agent_hub: TestClient) -> None:
@@ -1525,6 +1514,45 @@ def test_assignment_create_keeps_prior_write_reservation_after_not_found(
     ) == 1
 
 
+def test_recovering_create_keeps_its_lease_after_an_uncertain_write(
+    agent_hub: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    hub = agent_hub.app.state.hub
+    github: FakeGitHub = hub.github
+    payload = dict(ASSIGNMENT, request_id=REQUEST_ID)
+
+    def timeout_without_issue(*_args, **_kwargs):
+        raise GitHubError("GitHub request failed: ReadTimeout")
+
+    monkeypatch.setattr(github, "create_issue", timeout_without_issue)
+    assert agent_hub.post("/api/assignments", json=payload).status_code == 502
+    hub.store.execute(
+        "UPDATE request_reservation SET lease_until = ? WHERE request_id = ?",
+        ("2000-01-01T00:00:00Z", REQUEST_ID),
+    )
+    create_calls: list[int] = []
+
+    def count_and_timeout(*_args, **_kwargs):
+        create_calls.append(1)
+        raise GitHubError("GitHub request failed: ReadTimeout")
+
+    monkeypatch.setattr(github, "create_issue", count_and_timeout)
+
+    recovering = agent_hub.post("/api/assignments", json=payload)
+    lease = hub.store.query_one(
+        "SELECT lease_until FROM request_reservation WHERE request_id = ?",
+        (REQUEST_ID,),
+    )
+    resubmitted = agent_hub.post("/api/assignments", json=payload)
+
+    assert recovering.status_code == 502
+    assert lease is not None and lease["lease_until"] > "2000-01-01T00:00:00Z"
+    assert resubmitted.status_code == 409
+    assert resubmitted.json()["detail"] == "request is still in progress; retry shortly"
+    assert create_calls == [1]
+
+
 def test_concurrent_assignment_requests_create_one_issue(
     agent_hub: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1638,15 +1666,15 @@ def test_assignment_reply_body_length_errors(
     ],
 )
 def test_real_github_rejects_invalid_repo_before_building_request_path(
-    cfg, monkeypatch: pytest.MonkeyPatch, call
+    cfg, call
 ) -> None:
-    def unexpected_request(*_args, **_kwargs):
+    def unexpected_request(_request: httpx.Request) -> httpx.Response:
         raise AssertionError("invalid repository reached HTTP transport")
 
-    monkeypatch.setattr(httpx, "request", unexpected_request)
+    github = RealGitHub(cfg, transport=httpx.MockTransport(unexpected_request))
 
     with pytest.raises(GitHubError, match="invalid GitHub repository name"):
-        call(RealGitHub(cfg))
+        call(github)
 
 
 @pytest.mark.parametrize(
@@ -1869,40 +1897,39 @@ def test_assignment_retries_missing_assignee_then_returns_issue_url(agent_hub: T
 
 
 def _assignee_add_scenario(
-    agent_hub: TestClient, monkeypatch: pytest.MonkeyPatch, add_assignees: list[dict[str, str]]
+    agent_hub: TestClient, add_assignees: list[dict[str, str]]
 ) -> tuple[object, list[tuple[str, str]]]:
     sign_in(agent_hub, "code-alice")
     hub = agent_hub.app.state.hub
-    hub.github = RealGitHub(hub.cfg)
     calls: list[tuple[str, str]] = []
     responses = iter(
         [
-            _Response(
+            httpx.Response(
                 201,
-                {
+                json={
                     "number": 1,
                     "html_url": "https://github.test/Acme/Widget/issues/1",
                     "repository_url": "https://api.github.test/repos/Acme/Widget",
                     "assignees": [],
                 },
             ),
-            _Response(200, {"number": 1, "assignees": []}),
-            _Response(201, {"number": 1, "assignees": add_assignees}),
+            httpx.Response(200, json={"number": 1, "assignees": []}),
+            httpx.Response(201, json={"number": 1, "assignees": add_assignees}),
         ]
     )
 
-    def request(method: str, url: str, **_kwargs: object) -> _Response:
-        calls.append((method, url))
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, str(request.url)))
         return next(responses)
 
-    monkeypatch.setattr(httpx, "request", request)
+    hub.github = RealGitHub(hub.cfg, transport=httpx.MockTransport(handler))
     return agent_hub.post("/api/assignments", json=ASSIGNMENT), calls
 
 
 def test_assignment_accepts_201_add_and_the_add_response_decides(
-    agent_hub: TestClient, monkeypatch: pytest.MonkeyPatch
+    agent_hub: TestClient,
 ) -> None:
-    response, calls = _assignee_add_scenario(agent_hub, monkeypatch, [{"login": "helperbot"}])
+    response, calls = _assignee_add_scenario(agent_hub, [{"login": "helperbot"}])
     assert response.status_code == 201, response.text
     assert [method for method, _url in calls] == ["POST", "GET", "POST"]
     assert calls[2][1].endswith("/repos/Acme/Widget/issues/1/assignees")
@@ -1914,9 +1941,9 @@ def test_assignment_accepts_201_add_and_the_add_response_decides(
 
 
 def test_assignment_add_response_without_agent_returns_issue_url(
-    agent_hub: TestClient, monkeypatch: pytest.MonkeyPatch
+    agent_hub: TestClient,
 ) -> None:
-    response, calls = _assignee_add_scenario(agent_hub, monkeypatch, [])
+    response, calls = _assignee_add_scenario(agent_hub, [])
     assert response.status_code == 502
     assert response.json()["url"] == "https://github.test/Acme/Widget/issues/1"
     assert response.json()["number"] == 1
@@ -1924,16 +1951,17 @@ def test_assignment_add_response_without_agent_returns_issue_url(
 
 
 def test_assignment_transport_errors_are_bounded_and_preserve_created_issue(
-    agent_hub: TestClient, monkeypatch: pytest.MonkeyPatch
+    agent_hub: TestClient,
 ) -> None:
     sign_in(agent_hub, "code-alice")
     hub = agent_hub.app.state.hub
-    hub.github = RealGitHub(hub.cfg)
 
-    def fail_create(*_args: object, **_kwargs: object) -> _Response:
-        raise httpx.ConnectError("transport included tok-alice and a sensitive query")
+    def fail_create(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError(
+            "transport included tok-alice and a sensitive query", request=request
+        )
 
-    monkeypatch.setattr(httpx, "request", fail_create)
+    hub.github = RealGitHub(hub.cfg, transport=httpx.MockTransport(fail_create))
     failed_create = agent_hub.post("/api/assignments", json=ASSIGNMENT)
     assert failed_create.status_code == 502
     assert failed_create.json() == {"detail": "GitHub request failed: ConnectError"}
@@ -1941,22 +1969,24 @@ def test_assignment_transport_errors_are_bounded_and_preserve_created_issue(
 
     calls = 0
 
-    def fail_after_create(*_args: object, **_kwargs: object) -> _Response:
+    def fail_after_create(request: httpx.Request) -> httpx.Response:
         nonlocal calls
         calls += 1
         if calls == 1:
-            return _Response(
+            return httpx.Response(
                 201,
-                {
+                json={
                     "number": 2,
                     "html_url": "https://github.test/Acme/Widget/issues/2",
                     "repository_url": "https://api.github.test/repos/Acme/Widget",
                     "assignees": [{"login": "helperbot"}],
                 },
             )
-        raise httpx.ReadTimeout("transport included tok-alice and a sensitive query")
+        raise httpx.ReadTimeout(
+            "transport included tok-alice and a sensitive query", request=request
+        )
 
-    monkeypatch.setattr(httpx, "request", fail_after_create)
+    hub.github = RealGitHub(hub.cfg, transport=httpx.MockTransport(fail_after_create))
     failed_verify = agent_hub.post("/api/assignments", json=ASSIGNMENT)
     assert failed_verify.status_code == 502
     assert failed_verify.json() == {
@@ -2865,68 +2895,61 @@ def test_reply_to_a_transferred_issue_comments_on_the_issue_that_authorized_it(
     assert reply["payload"]["number"] == 9
 
 
-def test_real_github_comments_follows_last_page_for_newest_comments(
-    cfg, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_real_github_comments_follows_last_page_for_newest_comments(cfg) -> None:
     calls: list[dict[str, object]] = []
     first_page = [{"id": index} for index in range(100)]
     last_page = [{"id": index} for index in range(100, 130)]
 
-    def request(_method: str, _url: str, **kwargs: object) -> _Response:
-        params = kwargs["params"]
-        assert isinstance(params, dict)
+    def handler(request: httpx.Request) -> httpx.Response:
+        params = {key: int(value) for key, value in request.url.params.multi_items()}
         calls.append(params)
         if params.get("page") == 2:
-            return _Response(200, last_page)
-        return _Response(
+            return httpx.Response(200, json=last_page)
+        return httpx.Response(
             200,
-            first_page,
-            {
+            json=first_page,
+            headers={
                 "Link": '<https://api.github.com/repos/Acme/Widget/issues/1/comments?per_page=100&page=2>; rel="next", '
                 '<https://api.github.com/repos/Acme/Widget/issues/1/comments?per_page=100&page=2>; rel="last"'
             },
         )
 
-    monkeypatch.setattr(httpx, "request", request)
-    comments = RealGitHub(cfg).issue_comments("tok-alice", "Acme/Widget", 1)
+    github = RealGitHub(cfg, transport=httpx.MockTransport(handler))
+    comments = github.issue_comments("tok-alice", "Acme/Widget", 1)
     assert [comment["id"] for comment in comments[-20:]] == list(range(110, 130))
     assert calls == [{"per_page": 100}, {"per_page": 100, "page": 2}]
 
 
 @pytest.mark.parametrize("invalid_page", [1, 2])
 def test_real_github_comments_rejects_non_list_page(
-    cfg, monkeypatch: pytest.MonkeyPatch, invalid_page: int
+    cfg, invalid_page: int
 ) -> None:
-    def request(_method: str, _url: str, **kwargs: object) -> _Response:
-        params = kwargs["params"]
-        assert isinstance(params, dict)
-        page = int(params.get("page", 1))
+    def handler(request: httpx.Request) -> httpx.Response:
+        page = int(request.url.params.get("page", "1"))
         if page == invalid_page:
-            return _Response(200, {"message": "unexpected object"})
-        return _Response(
+            return httpx.Response(200, json={"message": "unexpected object"})
+        return httpx.Response(
             200,
-            [{"id": 1}],
-            {
+            json=[{"id": 1}],
+            headers={
                 "Link": '<https://api.github.com/repos/Acme/Widget/issues/1/comments?per_page=100&page=2>; rel="last"'
             },
         )
 
-    monkeypatch.setattr(httpx, "request", request)
+    github = RealGitHub(cfg, transport=httpx.MockTransport(handler))
 
     with pytest.raises(
         GitHubError, match="GitHub comment lookup returned an invalid response"
     ):
-        RealGitHub(cfg).issue_comments("tok-alice", "Acme/Widget", 1)
+        github.issue_comments("tok-alice", "Acme/Widget", 1)
 
 
 @pytest.mark.parametrize("invalid_page", [1, 2])
 def test_real_github_comments_rejects_non_object_page_item(
-    cfg, monkeypatch: pytest.MonkeyPatch, invalid_page: int
+    cfg, invalid_page: int
 ) -> None:
-    def request(_method: str, _url: str, **kwargs: object) -> _Response:
-        params = kwargs["params"]
-        assert isinstance(params, dict)
-        page = int(params.get("page", 1))
+    def handler(request: httpx.Request) -> httpx.Response:
+        page = int(request.url.params.get("page", "1"))
         body: list[object] = [{"id": page}]
         if page == invalid_page:
             body.append("invalid comment")
@@ -2935,29 +2958,33 @@ def test_real_github_comments_rejects_non_object_page_item(
             headers = {
                 "Link": '<https://api.github.com/repos/Acme/Widget/issues/1/comments?per_page=100&page=2>; rel="last"'
             }
-        return _Response(200, body, headers)
+        return httpx.Response(200, json=body, headers=headers)
 
-    monkeypatch.setattr(httpx, "request", request)
+    github = RealGitHub(cfg, transport=httpx.MockTransport(handler))
 
     with pytest.raises(
         GitHubError, match="GitHub comment lookup returned an invalid response"
     ):
-        RealGitHub(cfg).issue_comments("tok-alice", "Acme/Widget", 1)
+        github.issue_comments("tok-alice", "Acme/Widget", 1)
 
 
-def test_real_github_lists_recent_issues_by_creator(
-    cfg, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_real_github_lists_recent_issues_by_creator(cfg) -> None:
     seen: list[tuple[str, str, dict[str, object]]] = []
 
-    def request(method: str, url: str, **kwargs: object) -> _Response:
-        params = kwargs["params"]
-        assert isinstance(params, dict)
-        seen.append((method, url, params))
-        return _Response(200, [{"number": 3}, {"number": 2}])
+    def handler(request: httpx.Request) -> httpx.Response:
+        params: dict[str, object] = dict(request.url.params)
+        params["per_page"] = int(params["per_page"])
+        seen.append(
+            (
+                request.method,
+                str(request.url).partition("?")[0],
+                params,
+            )
+        )
+        return httpx.Response(200, json=[{"number": 3}, {"number": 2}])
 
-    monkeypatch.setattr(httpx, "request", request)
-    rows = RealGitHub(cfg).recent_issues_by_creator("tok-alice", "Acme/Widget", "alice")
+    github = RealGitHub(cfg, transport=httpx.MockTransport(handler))
+    rows = github.recent_issues_by_creator("tok-alice", "Acme/Widget", "alice")
 
     assert [row["number"] for row in rows] == [3, 2]
     assert seen == [
@@ -2975,35 +3002,32 @@ def test_real_github_lists_recent_issues_by_creator(
     ]
 
 
-def test_real_github_comments_keeps_all_pages_when_last_page_is_short(
-    cfg, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_real_github_comments_keeps_all_pages_when_last_page_is_short(cfg) -> None:
     calls: list[dict[str, object]] = []
     first_page = [{"id": index} for index in range(100)]
     last_page = [{"id": index} for index in range(100, 105)]
 
-    def request(_method: str, _url: str, **kwargs: object) -> _Response:
-        params = kwargs["params"]
-        assert isinstance(params, dict)
+    def handler(request: httpx.Request) -> httpx.Response:
+        params = {key: int(value) for key, value in request.url.params.multi_items()}
         calls.append(params)
         if params.get("page") == 2:
-            return _Response(
+            return httpx.Response(
                 200,
-                last_page,
-                {
+                json=last_page,
+                headers={
                     "Link": '<https://api.github.com/repos/Acme/Widget/issues/1/comments?per_page=100&page=1>; rel="prev"'
                 },
             )
-        return _Response(
+        return httpx.Response(
             200,
-            first_page,
-            {
+            json=first_page,
+            headers={
                 "Link": '<https://api.github.com/repos/Acme/Widget/issues/1/comments?per_page=100&page=2>; rel="last"'
             },
         )
 
-    monkeypatch.setattr(httpx, "request", request)
-    comments = RealGitHub(cfg).issue_comments("tok-alice", "Acme/Widget", 1)
+    github = RealGitHub(cfg, transport=httpx.MockTransport(handler))
+    comments = github.issue_comments("tok-alice", "Acme/Widget", 1)
     assert [comment["id"] for comment in comments[-20:]] == list(range(85, 105))
     assert calls == [
         {"per_page": 100},
@@ -3110,16 +3134,46 @@ def test_real_github_recovery_paginates_comments_backward_to_marker(cfg) -> None
     assert calls == [1, 3, 2]
 
 
-def test_real_github_does_not_start_read_with_no_time_left(
-    cfg, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def unexpected_request(*_args, **_kwargs):
+def test_real_github_does_not_start_read_with_no_time_left(cfg) -> None:
+    def unexpected_request(_request: httpx.Request) -> httpx.Response:
         raise AssertionError("transport started with no time left")
 
-    monkeypatch.setattr(httpx, "request", unexpected_request)
+    github = RealGitHub(cfg, transport=httpx.MockTransport(unexpected_request))
 
     with pytest.raises(GitHubError, match="time budget exhausted"):
-        RealGitHub(cfg).issue("tok-alice", "Acme/Widget", 1, 0.0)
+        github.issue("tok-alice", "Acme/Widget", 1, 0.0)
+
+
+def test_real_github_write_stream_is_stopped_by_the_deadline(
+    cfg, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import agent_core.github as github_module
+
+    stream = _BlockingByteStream(wait_timeout=2.0)
+    expected_body = {
+        "title": "Title",
+        "body": "Body",
+        "assignees": ["helperbot"],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/repos/Acme/Widget/issues"
+        assert json.loads(request.content) == expected_body
+        return httpx.Response(201, stream=stream)
+
+    monkeypatch.setattr(github_module, "GITHUB_REQUEST_TIMEOUT", 0.2)
+    github = RealGitHub(cfg, transport=httpx.MockTransport(handler))
+    started = time.monotonic()
+
+    with pytest.raises(GitHubError, match="time budget exhausted"):
+        github.create_issue(
+            "tok-alice", "Acme/Widget", "Title", "Body", ["helperbot"]
+        )
+
+    elapsed = time.monotonic() - started
+    assert stream.closed.is_set()
+    assert elapsed < 1.5
 
 
 def test_real_github_does_not_follow_redirect_after_deadline(
@@ -3320,7 +3374,7 @@ def test_assignment_and_timeline_links_use_safe_href() -> None:
     ],
 )
 def test_real_github_follows_rename_redirects_with_the_token(
-    cfg, monkeypatch: pytest.MonkeyPatch, status: int, method: str, call
+    cfg, status: int, method: str, call
 ) -> None:
     seen: list[tuple[str, str, str | None]] = []
 
@@ -3334,14 +3388,48 @@ def test_real_github_follows_rename_redirects_with_the_token(
             json={"number": 7, "id": 1, "body": "hello", "html_url": "https://github.com/Acme/New/issues/7"},
         )
 
-    client = httpx.Client(transport=httpx.MockTransport(handler))
-
-    def request(verb: str, url: str, **kwargs: object) -> httpx.Response:
-        return client.request(verb, url, **kwargs)
-
-    monkeypatch.setattr(httpx, "request", request)
-    result = call(RealGitHub(cfg))
+    github = RealGitHub(cfg, transport=httpx.MockTransport(handler))
+    result = call(github)
     assert result["number"] == 7
     assert [entry[0] for entry in seen] == [method, method]
     assert seen[1][1].startswith("/repositories/42/")
     assert seen[1][2] == "Bearer tok-alice"
+
+
+def test_real_github_follows_write_redirect_with_method_body_and_token(cfg) -> None:
+    expected_body = {
+        "title": "Title",
+        "body": "Body",
+        "assignees": ["helperbot"],
+    }
+    seen: list[tuple[str, str, dict[str, object], str | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(
+            (
+                request.method,
+                request.url.path,
+                json.loads(request.content),
+                request.headers.get("Authorization"),
+            )
+        )
+        if request.url.path == "/repos/Acme/Old/issues":
+            return httpx.Response(307, headers={"Location": "/repositories/42/issues"})
+        return httpx.Response(
+            201,
+            json={
+                "number": 42,
+                "html_url": "https://github.com/Acme/New/issues/42",
+            },
+        )
+
+    github = RealGitHub(cfg, transport=httpx.MockTransport(handler))
+    result = github.create_issue(
+        "tok-alice", "Acme/Old", "Title", "Body", ["helperbot"]
+    )
+
+    assert result["number"] == 42
+    assert seen == [
+        ("POST", "/repos/Acme/Old/issues", expected_body, "Bearer tok-alice"),
+        ("POST", "/repositories/42/issues", expected_body, "Bearer tok-alice"),
+    ]

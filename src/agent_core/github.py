@@ -294,23 +294,12 @@ class RealGitHub(GitHub):
                     "X-GitHub-Api-Version": "2022-11-28",
                 },
             }
-            if timeout is None:
-                resp = httpx.request(
-                    method,
-                    f"{GITHUB_API_URL}{path}",
-                    **request_kwargs,
-                    timeout=request_timeout,
-                    # GitHub answers a renamed or transferred repository with 301 (GET) or
-                    # 307 (writes); httpx drops Authorization if a redirect leaves the host.
-                    follow_redirects=True,
-                )
-            else:
-                resp = self._request_with_deadline(
-                    method,
-                    f"{GITHUB_API_URL}{path}",
-                    request_kwargs,
-                    time.monotonic() + request_timeout,
-                )
+            resp = self._request_with_deadline(
+                method,
+                f"{GITHUB_API_URL}{path}",
+                request_kwargs,
+                time.monotonic() + request_timeout,
+            )
         except httpx.HTTPError as exc:
             raise GitHubError(f"GitHub request failed: {type(exc).__name__}") from exc
         if resp.status_code not in expected:
@@ -388,6 +377,9 @@ class RealGitHub(GitHub):
             active[:] = [response]
             try:
                 _check_deadline(deadline)
+                # GitHub answers a renamed or transferred repository with 301 (GET) or
+                # 307 (writes). httpx next_request keeps method and body for 307/308 and
+                # drops Authorization if a redirect leaves the host.
                 next_request = response.next_request
                 if next_request is not None:
                     redirects += 1
