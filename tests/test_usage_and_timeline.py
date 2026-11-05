@@ -356,6 +356,7 @@ def test_timeline_order_relations_and_visibility(agent_hub: TestClient) -> None:
             "created_at": "2026-11-04T10:01:30Z",
             "payload": {
                 "agent": "helperbot",
+                "actor": "alice",
                 "repo": "Acme/Widget",
                 "number": 12,
                 "url": "https://github.com/Acme/Widget/issues/12",
@@ -384,6 +385,7 @@ def test_timeline_order_relations_and_visibility(agent_hub: TestClient) -> None:
             "payload": {
                 "agent": "helperbot",
                 "agents": ["helperbot"],
+                "actor": "alice",
                 "repo": "Acme/Widget",
                 "number": 12,
                 "url": "https://github.com/Acme/Widget/issues/12#issuecomment-1",
@@ -401,9 +403,33 @@ def test_timeline_order_relations_and_visibility(agent_hub: TestClient) -> None:
             "id": "timeline-other-assignment",
             "type": "assignment.created",
             "created_at": "2026-11-04T10:02:45Z",
-            "payload": {"agent": "someone-else", "repo": "Acme/Other", "number": 1},
+            "payload": {
+                "agent": "someone-else",
+                "actor": "alice",
+                "repo": "Acme/Other",
+                "number": 1,
+            },
         },
     )
+    for row_id, origin, actor in (
+        ("timeline-device-assignment", "device-alice", "alice"),
+        ("timeline-actor-mismatch", "web:alice", "bob"),
+    ):
+        _insert_replica(
+            agent_hub,
+            table="activity",
+            row_id=row_id,
+            updated_at="2026-11-04T10:02:50Z",
+            login="alice",
+            origin=origin,
+            payload={
+                "id": row_id,
+                "type": "assignment.created",
+                "created_at": "2026-11-04T10:02:50Z",
+                "session_id": "timeline-session",
+                "payload": {"agent": "helperbot", "actor": actor},
+            },
+        )
     _insert_replica(
         agent_hub,
         table="local_check",
@@ -451,6 +477,54 @@ def test_timeline_order_relations_and_visibility(agent_hub: TestClient) -> None:
     sign_in(agent_hub, "code-dave")
     assert agent_hub.get("/api/sessions/timeline-session/timeline").status_code == 404
     assert agent_hub.get("/sessions/timeline-session").status_code == 404
+
+
+def test_timeline_equal_times_sort_by_row_id_before_table(
+    agent_hub: TestClient,
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    _insert_replica(
+        agent_hub,
+        table="session",
+        row_id="tie-session",
+        updated_at="2026-11-05T09:00:00Z",
+        login="helperbot",
+        payload={"id": "tie-session", "created_at": "2026-11-05T09:00:00Z"},
+    )
+    _insert_replica(
+        agent_hub,
+        table="activity",
+        row_id="z-activity",
+        updated_at="2026-11-05T10:00:00Z",
+        login="helperbot",
+        payload={
+            "id": "z-activity",
+            "session_id": "tie-session",
+            "created_at": "2026-11-05T10:00:00Z",
+        },
+    )
+    _insert_replica(
+        agent_hub,
+        table="task",
+        row_id="a-task",
+        updated_at="2026-11-05T10:00:00Z",
+        login="helperbot",
+        payload={
+            "id": "a-task",
+            "session_id": "tie-session",
+            "created_at": "2026-11-05T10:00:00Z",
+        },
+    )
+
+    timeline = agent_hub.get("/api/session-timeline?id=tie-session").json()[
+        "timeline"
+    ]
+
+    assert [row["row_id"] for row in timeline] == [
+        "tie-session",
+        "a-task",
+        "z-activity",
+    ]
 
 
 def test_timeline_truncates_at_5000(agent_hub: TestClient) -> None:
@@ -598,6 +672,15 @@ def test_session_page_handles_ids_and_signed_out_timeline_fetches() -> None:
         (
             {"tools": [{"tool": "Grep", "target": "x", "error": False}], "tools_truncated": "yes"},
             {"calls": [{"tool": "Grep", "target": "x", "error": ""}], "truncated": False},
+        ),
+        (
+            {
+                "tools": [{"tool": "Write", "target": "x", "status": "error"}],
+                "tool_calls": [
+                    {"name": "Legacy", "command": "ignored", "status": "error"}
+                ],
+            },
+            {"calls": [{"tool": "Write", "target": "x", "error": ""}], "truncated": False},
         ),
         ({}, {"calls": [], "truncated": False}),
     ],

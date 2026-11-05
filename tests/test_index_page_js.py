@@ -29,26 +29,22 @@ def test_request_id_final_statuses() -> None:
     script = f"""
 {function}
 const cases = [
-  [200, "", true],
-  [201, "", true],
-  [400, "bad request", true],
-  [403, "forbidden", true],
-  [404, "not found", true],
-  [409, "sign in on the website again", true],
-  [409, "request id was used for different content; reload the assignment list", true],
-  [409, "request is still in progress; retry shortly", false],
-  [409, "request already completed; reload the assignment list", false],
-  [500, "server error", false],
-  [502, "ambiguous failure without url", false],
-  [502, "ambiguous failure with url", false],
-  [0, "AbortError", false],
-  [0, "network error", false],
+  [200, {{}}, true],
+  [201, {{}}, true],
+  [400, {{request_id_final: true}}, true],
+  [403, {{request_id_final: true}}, true],
+  [404, {{request_id_final: true}}, true],
+  [409, {{request_id_final: true}}, true],
+  [409, {{request_id_final: false}}, false],
+  [409, {{detail: "sign in on the website again"}}, false],
+  [502, {{request_id_final: false, url: "https://github.test/issue/1"}}, false],
+  [0, {{}}, false],
 ];
-process.stdout.write(JSON.stringify(cases.map(([status, detail, expected]) => ({{
+process.stdout.write(JSON.stringify(cases.map(([status, failure, expected]) => ({{
   status,
-  detail,
+  failure,
   expected,
-  actual: requestIdIsFinal(status, detail),
+  actual: requestIdIsFinal(status, failure),
 }}))));
 """
     result = subprocess.run(
@@ -65,8 +61,8 @@ def test_assignment_handlers_use_request_id_final_decision() -> None:
     )
 
     for handler in (assign_handler, reply_handler):
-        assert "requestIdIsFinal(res.status, failure.detail)" in handler
-        assert 'requestIdIsFinal(res.status, "")' in handler
+        assert "requestIdIsFinal(res.status, failure)" in handler
+        assert "requestIdIsFinal(res.status, {})" in handler
         assert "pendingRequestId(pendingStorage, pendingKey, payloadJson, form.dataset.requestId)" in handler
         assert "forgetPendingRequest(pendingStorage, pendingKey)" in handler
         catch = handler.split("catch (e)", 1)[1].split("finally", 1)[0]

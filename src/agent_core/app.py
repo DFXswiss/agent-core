@@ -57,6 +57,10 @@ ISSUE_CACHE_MAX_ENTRIES = 500
 ASSIGNMENT_ENRICHMENT_LIMIT = 50
 REQUEST_LEASE_SECONDS = 120
 GITHUB_REAUTH_DETAIL = "sign in on the website again"
+GITHUB_TOKEN_REQUIRED_DETAIL = "sign in on the website once so the hub holds your GitHub token"
+REQUEST_FINGERPRINT_CONFLICT_DETAIL = (
+    "request id was used for different content; reload the assignment list"
+)
 REQUEST_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 HUB_AUTHORED_ACTIVITY_TYPES = frozenset({"assignment.created", "assignment.reply"})
 _MISSING = object()
@@ -197,6 +201,16 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         https_only=cfg.public_url.startswith("https://"),
     )
     app.state.hub = hub
+
+    @app.exception_handler(HTTPException)
+    async def http_exception_response(request: Request, exc: HTTPException) -> JSONResponse:
+        content: dict[str, Any] = {"detail": exc.detail}
+        request_id_final = _request_id_error_is_final(
+            request, exc.status_code, exc.detail
+        )
+        if request_id_final is not None:
+            content["request_id_final"] = request_id_final
+        return JSONResponse(content, status_code=exc.status_code, headers=exc.headers)
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -490,6 +504,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
 
     @app.post("/api/assignments")
     async def api_assignment_create(request: Request, body: dict[str, Any]):
+        _prepare_request_id_error_state(request, body)
         actor, device_actor = _request_actor(hub, request)
         if device_actor and hub.roster.is_agent(actor):
             raise HTTPException(status_code=403, detail="an agent device cannot create assignments")
@@ -505,7 +520,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         issue_body = _bounded_body_string(body, "body", 1, 60000)
         request_id = _optional_request_id(body)
         request_fingerprint = _request_fingerprint(
-            {"repo": repo, "title": title, "body": issue_body, "agent": agent}
+            {"repo": repo.casefold(), "title": title, "body": issue_body, "agent": agent}
         )
         request_owner = uuid.uuid4().hex
         if request_id is not None:
@@ -522,7 +537,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
             if reservation == "conflict":
                 raise HTTPException(
                     status_code=409,
-                    detail="request id was used for different content; reload the assignment list",
+                    detail=REQUEST_FINGERPRINT_CONFLICT_DETAIL,
                 )
             if reservation == "done":
                 replay = _assignment_request_replay(
@@ -580,6 +595,8 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                 created = await asyncio.to_thread(
                     hub.github.create_issue, token, repo, title, posted_body, [agent]
                 )
+            if request_id is not None:
+                request.state.request_id_prior_write = True
             issue_created = True
             created_number = created.get("number")
             created_url = created.get("html_url")
@@ -611,11 +628,11 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                 current = await asyncio.to_thread(hub.github.add_assignees, token, repo, number, [agent])
             if agent not in _issue_assignees(current):
                 return JSONResponse(
-                    {
+                    _request_id_error_content(request, 502, {
                         "detail": "GitHub did not retain the requested assignee after one retry",
                         "url": url,
                         "number": number,
-                    },
+                    }),
                     status_code=502,
                 )
         except HTTPException:
@@ -632,13 +649,14 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                     reauth_failure["url"] = url
                 if issue_created and number is not None:
                     reauth_failure["number"] = number
-                if request_id is not None and not issue_created and (
-                    not issue_write_started or exc.status_code is not None
-                ):
+                if request_id is not None:
                     hub.store.release_request(
                         actor, "assignment.created", request_id, request_owner
                     )
-                return JSONResponse(reauth_failure, status_code=409)
+                return JSONResponse(
+                    _request_id_error_content(request, 409, reauth_failure),
+                    status_code=409,
+                )
             if issue_created:
                 failure: dict[str, Any] = {"detail": _bounded_github_error(exc)}
                 if url:
@@ -646,7 +664,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                 if number is not None:
                     failure["number"] = number
                 return JSONResponse(
-                    failure,
+                    _request_id_error_content(request, 502, failure),
                     status_code=502,
                 )
             if request_id is not None and (
@@ -721,16 +739,16 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         assignments: list[dict[str, Any]] = []
         enrich = bool(token)
         for row in rows:
-            row_login = row["github_login"]
-            if not isinstance(row_login, str) or row["origin_device_id"] != f"web:{row_login}":
-                continue
             payload = loads(row["payload"])
-            if not isinstance(payload, dict) or payload.get("type") != "assignment.created":
+            if (
+                not isinstance(payload, dict)
+                or not _trusted_hub_activity(row, payload)
+                or payload.get("type") != "assignment.created"
+            ):
                 continue
             inner = payload.get("payload")
             if (
                 not isinstance(inner, dict)
-                or inner.get("actor") != row_login
                 or str(inner.get("agent", "")).lower() != wanted
             ):
                 continue
@@ -761,6 +779,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
     async def api_assignment_reply(
         request: Request, owner: str, name: str, number: int, body: dict[str, Any]
     ):
+        _prepare_request_id_error_state(request, body)
         actor, device_actor = _request_actor(hub, request)
         if device_actor and hub.roster.is_agent(actor):
             raise HTTPException(
@@ -773,7 +792,12 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         comment_body = _bounded_body_string(body, "body", 1, 60000)
         request_id = _optional_request_id(body)
         request_fingerprint = _request_fingerprint(
-            {"owner": owner, "name": name, "number": number, "body": comment_body}
+            {
+                "owner": owner.casefold(),
+                "name": name.casefold(),
+                "number": number,
+                "body": comment_body,
+            }
         )
         request_owner = uuid.uuid4().hex
         if request_id is not None:
@@ -790,7 +814,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
             if reservation == "conflict":
                 raise HTTPException(
                     status_code=409,
-                    detail="request id was used for different content; reload the assignment list",
+                    detail=REQUEST_FINGERPRINT_CONFLICT_DETAIL,
                 )
             if reservation == "done":
                 replay = _assignment_request_replay(
@@ -860,6 +884,8 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                 comment = await asyncio.to_thread(
                     hub.github.create_issue_comment, token, repo, number, posted_body
                 )
+            if request_id is not None:
+                request.state.request_id_prior_write = True
         except HTTPException:
             if request_id is not None:
                 hub.store.release_request(
@@ -1401,7 +1427,7 @@ def _github_token(hub: Hub, login: str) -> str:
     if not token:
         raise HTTPException(
             status_code=409,
-            detail="sign in on the website once so the hub holds your GitHub token",
+            detail=GITHUB_TOKEN_REQUIRED_DETAIL,
         )
     return token
 
@@ -1448,6 +1474,38 @@ def _request_fingerprint(payload: dict[str, Any]) -> str:
     return hashlib.sha256(dumps(payload).encode("utf-8")).hexdigest()
 
 
+def _prepare_request_id_error_state(request: Request, body: dict[str, Any]) -> None:
+    request.state.request_id_sent = "request_id" in body
+    request.state.request_id_prior_write = False
+
+
+def _request_id_error_is_final(
+    request: Request, status_code: int, detail: Any
+) -> bool | None:
+    if not getattr(request.state, "request_id_sent", False):
+        return None
+    if status_code in (400, 403, 404):
+        return True
+    if status_code != 409:
+        return False
+    if detail == REQUEST_FINGERPRINT_CONFLICT_DETAIL:
+        return True
+    if detail in (GITHUB_REAUTH_DETAIL, GITHUB_TOKEN_REQUIRED_DETAIL):
+        return not getattr(request.state, "request_id_prior_write", False)
+    return False
+
+
+def _request_id_error_content(
+    request: Request, status_code: int, content: dict[str, Any]
+) -> dict[str, Any]:
+    request_id_final = _request_id_error_is_final(
+        request, status_code, content.get("detail")
+    )
+    if request_id_final is not None:
+        content["request_id_final"] = request_id_final
+    return content
+
+
 def _renew_request_or_conflict(
     hub: Hub,
     actor: str,
@@ -1492,13 +1550,17 @@ def _assignment_request_replay(
     request_fingerprint: str,
 ) -> dict[str, Any] | None:
     rows = hub.store.query(
-        "SELECT payload FROM row_replica WHERE table_name = 'activity' "
+        "SELECT * FROM row_replica WHERE table_name = 'activity' "
         "AND origin_device_id = ? AND github_login = ? ORDER BY updated_at DESC, row_id DESC",
         (f"web:{actor}", actor),
     )
     for row in rows:
         payload = loads(row["payload"])
-        if not isinstance(payload, dict) or payload.get("type") != activity_type:
+        if (
+            not isinstance(payload, dict)
+            or not _trusted_hub_activity(row, payload)
+            or payload.get("type") != activity_type
+        ):
             continue
         inner = payload.get("payload")
         if (
@@ -1795,13 +1857,16 @@ def _lane_tool_view(payload: dict[str, Any]) -> dict[str, Any]:
     """
     inner = _activity_inner(payload)
     tools = inner.get("tools")
-    raw = tools if isinstance(tools, list) else inner.get("tool_calls")
+    modern = isinstance(tools, list)
+    raw = tools if modern else inner.get("tool_calls")
     calls: list[dict[str, str]] = []
     for call in raw if isinstance(raw, list) else []:
         if not isinstance(call, dict):
             continue
         error = call.get("error")
-        if error is True or (not error and call.get("status") == "error"):
+        if error is True or (
+            not modern and not error and call.get("status") == "error"
+        ):
             error_text = "error"
         elif isinstance(error, str):
             error_text = error
@@ -1863,6 +1928,8 @@ def _session_timeline(hub: Hub, session_row: Any, allowed: set[str]) -> list[dic
         payload = loads(row["payload"])
         if not isinstance(payload, dict):
             continue
+        if not _trusted_hub_activity(row, payload):
+            continue
         task_id = _payload_relation(payload, "task_id")
         inner = payload.get("payload")
         assignment_for_session = False
@@ -1893,7 +1960,7 @@ def _session_timeline(hub: Hub, session_row: Any, allowed: set[str]) -> list[dic
         if _payload_relation(payload, "session_id") == session_id or (task_id != "" and task_id in task_ids):
             selected.append((row, payload))
     timeline = [_timeline_item(row, payload) for row, payload in selected]
-    timeline.sort(key=lambda item: (item["at"], item["table"], item["row_id"]))
+    timeline.sort(key=lambda item: (item["at"], item["row_id"], item["table"]))
     return timeline
 
 
@@ -2365,6 +2432,8 @@ def _subscription_snapshots(hub: Hub, device: dict[str, Any]) -> list[dict[str, 
         payload = loads(row["payload"])
         if not isinstance(payload, dict):
             continue
+        if not _trusted_hub_activity(row, payload):
+            continue
         if not any(_match_applies(match, payload) for match in matches):
             continue
         key = (row["table_name"], row["row_id"])
@@ -2381,12 +2450,30 @@ def _query_matching_rows(hub: Hub, login: str, match: dict[str, Any]) -> list[di
         payload = loads(row["payload"])
         if not isinstance(payload, dict):
             continue
+        if not _trusted_hub_activity(row, payload):
+            continue
         if not _match_applies(match, payload):
             continue
         out.append(_replica_out(row))
         if len(out) >= QUERY_ROW_CAP:
             break
     return out
+
+
+def _trusted_hub_activity(row: Any, payload: dict[str, Any]) -> bool:
+    if (
+        row["table_name"] != "activity"
+        or payload.get("type") not in HUB_AUTHORED_ACTIVITY_TYPES
+    ):
+        return True
+    login = row["github_login"]
+    inner = payload.get("payload")
+    return (
+        isinstance(login, str)
+        and row["origin_device_id"] == f"web:{login}"
+        and isinstance(inner, dict)
+        and inner.get("actor") == login
+    )
 
 
 def _enqueue_subscription_fanout(hub: Hub, snap: dict[str, Any]) -> None:

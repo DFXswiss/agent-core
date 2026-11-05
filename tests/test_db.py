@@ -314,6 +314,49 @@ def test_record_web_event_for_request_records_once_and_finishes(tmp_path: Path) 
         store.close()
 
 
+def test_record_web_event_for_request_rolls_back_event_and_keeps_reservation(
+    tmp_path: Path,
+) -> None:
+    store = Store(str(tmp_path / "request-rollback.sqlite"))
+    key = ("alice", "assignment.created", "request-one")
+    try:
+        assert store.reserve_request(
+            *key,
+            "fingerprint-one",
+            "owner-one",
+            "2026-11-05T10:00:00Z",
+            "2026-11-05T10:02:00Z",
+        ) == "reserved"
+        store._conn = _FailingReplicaConnection(store._conn)
+
+        with pytest.raises(sqlite3.OperationalError, match="forced replica failure"):
+            store.record_web_event_for_request(
+                "web:alice",
+                "alice",
+                "activity",
+                "insert",
+                "activity-one",
+                '{"id":"activity-one"}',
+                "2026-11-05T10:01:00Z",
+                actor=key[0],
+                activity_type=key[1],
+                request_id=key[2],
+                owner="owner-one",
+            )
+
+        assert store.query("SELECT * FROM ledger_event") == []
+        assert store.query("SELECT * FROM row_replica") == []
+        reservation = store.query_one(
+            "SELECT status, owner FROM request_reservation WHERE actor = ? "
+            "AND activity_type = ? AND request_id = ?",
+            key,
+        )
+        assert reservation is not None
+        assert dict(reservation) == {"status": "pending", "owner": "owner-one"}
+    finally:
+        store.close()
+
+
 def test_record_web_event_for_request_rejects_owner_after_takeover(
     tmp_path: Path,
 ) -> None:

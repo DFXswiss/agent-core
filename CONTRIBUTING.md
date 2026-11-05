@@ -20,7 +20,7 @@ The website renders `/api/state` in that order. A filter must keep relative orde
 
 There are three documented exceptions:
 
-- `GET /api/session-timeline?id=<id>` (and legacy `GET /api/sessions/{id}/timeline`) is a log and is therefore oldest first.
+- `GET /api/session-timeline?id=<id>` (and legacy `GET /api/sessions/{id}/timeline`) is a log and is therefore oldest first, with ties ordered by row id and then table name.
 - The owned-agents list (`GET /auth/me` `owned_agents` and the dashboard **Agents** section) follows the roster in `teams.yaml`, sorted by login, because roster entries carry no change time. The pair page's login selector lists the signed-in login first, then the same owned-agents list.
 - The signed-in user's team names (`GET /auth/me` `teams`) are sorted by name, because roster entries carry no change time.
 

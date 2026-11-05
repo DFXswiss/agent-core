@@ -683,13 +683,9 @@
       }
     }
 
-    function requestIdIsFinal(status, detail) {
+    function requestIdIsFinal(status, failure) {
       if (status >= 200 && status < 300) return true;
-      if (status === 400 || status === 403 || status === 404) return true;
-      return status === 409 && (
-        detail === "sign in on the website again" ||
-        detail === "request id was used for different content; reload the assignment list"
-      );
+      return Boolean(failure && failure.request_id_final === true);
     }
 
     function loadAssignmentsForAgent(agent) {
@@ -1102,7 +1098,7 @@
           const res = await fetch("/api/assignments", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal: postCtl.signal });
           if (!res.ok) {
             const failure = await responseJson(res);
-            if (requestIdIsFinal(res.status, failure.detail)) {
+            if (requestIdIsFinal(res.status, failure)) {
               forgetPendingRequest(pendingStorage, pendingKey);
               delete form.dataset.requestId;
               clearRenderedRequestIds(formKey);
@@ -1117,7 +1113,7 @@
             }
             return;
           }
-          if (requestIdIsFinal(res.status, "")) {
+          if (requestIdIsFinal(res.status, {})) {
             forgetPendingRequest(pendingStorage, pendingKey);
             delete form.dataset.requestId;
             clearRenderedRequestIds(formKey);
@@ -1191,7 +1187,7 @@
           const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...requestPayload, request_id: form.dataset.requestId }), signal: postCtl.signal });
           if (!res.ok) {
             const failure = await responseJson(res);
-            if (requestIdIsFinal(res.status, failure.detail)) {
+            if (requestIdIsFinal(res.status, failure)) {
               forgetPendingRequest(pendingStorage, pendingKey);
               delete form.dataset.requestId;
               clearRenderedRequestIds(formKey);
@@ -1201,7 +1197,7 @@
             document.getElementById("action-err").textContent = failure.detail || "reply failed";
             return;
           }
-          if (requestIdIsFinal(res.status, "")) {
+          if (requestIdIsFinal(res.status, {})) {
             forgetPendingRequest(pendingStorage, pendingKey);
             delete form.dataset.requestId;
             clearRenderedRequestIds(formKey);
