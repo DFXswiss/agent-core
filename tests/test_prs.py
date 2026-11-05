@@ -343,6 +343,10 @@ def test_index_agent_render_preserves_forms_and_handles_fetch_lifecycle() -> Non
     assert "selectionEnd" in html
     assert "setSelectionRange" in html
     assert "assignmentControllers.forEach(ctl => ctl.abort())" in abort_fn
+    assert "++agentRenderGen" in abort_fn
+    assert abort_fn.index("assignmentControllers.forEach(ctl => ctl.abort())") < abort_fn.index(
+        "++agentRenderGen"
+    )
     assert "++agentRenderGen" in clear_fn
     assert "++agentSessionEpoch" in clear_fn
     assert html.count("++agentSessionEpoch") == 1

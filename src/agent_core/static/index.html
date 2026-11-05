@@ -296,6 +296,7 @@
       const u = usageInflight; usageInflight = null;
       assignmentControllers.forEach(ctl => ctl.abort());
       assignmentControllers.clear();
+      ++agentRenderGen;
       if (s) s.ctl.abort();
       if (p) p.ctl.abort();
       if (u) u.ctl.abort();
