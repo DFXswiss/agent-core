@@ -827,6 +827,39 @@ def test_reply_reaches_agents_of_other_owners_but_needs_an_own_agent(
     assert refused.status_code == 403
 
 
+def test_reply_to_a_transferred_issue_comments_on_the_issue_that_authorized_it(
+    agent_hub: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    assert agent_hub.post("/api/assignments", json=ASSIGNMENT).status_code == 201
+    github: FakeGitHub = agent_hub.app.state.hub.github
+    moved = {
+        "number": 9,
+        "html_url": "https://github.test/Acme/Other/issues/9",
+        "repository_url": "https://api.github.test/repos/Acme/Other",
+        "assignees": [{"login": "helperbot"}],
+    }
+    github.issues[("Acme/Other", 9)] = moved
+    original_issue = github.issue
+
+    def transferred(token: str, repo: str, number: int) -> dict:
+        if (repo, number) == ("Acme/Widget", 1):
+            return dict(moved)
+        return original_issue(token, repo, number)
+
+    monkeypatch.setattr(github, "issue", transferred)
+    response = agent_hub.post(
+        "/api/assignments/Acme/Widget/1/comments", json={"body": "After the move."}
+    )
+    assert response.status_code == 201, response.text
+    comment = [call for call in github.issue_calls if call["operation"] == "create_issue_comment"][-1]
+    assert (comment["repo"], comment["number"]) == ("Acme/Other", 9)
+    state = agent_hub.get("/api/state").json()
+    reply = next(row for row in state["activity"] if row.get("type") == "assignment.reply")
+    assert reply["payload"]["issue_key"] == "Acme/Other#9"
+    assert reply["payload"]["number"] == 9
+
+
 def test_real_github_comments_follows_last_page_for_newest_comments(
     cfg, monkeypatch: pytest.MonkeyPatch
 ) -> None:

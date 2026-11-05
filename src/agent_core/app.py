@@ -645,7 +645,13 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         token = _github_token(hub, actor)
         try:
             issue_row = await asyncio.to_thread(hub.github.issue, token, repo, number)
+            # A transferred issue redirects to its new repository and number; comment
+            # on exactly the issue whose assignees authorized the reply.
+            path_repo, path_number = repo, number
             repo = _issue_repository_name(issue_row) or repo
+            fetched_number = issue_row.get("number")
+            if isinstance(fetched_number, int) and not isinstance(fetched_number, bool) and fetched_number > 0:
+                number = fetched_number
             # Every assigned agent's timeline gets the reply; only the actor's own
             # agents grant the right to post it.
             assigned_agents = {
@@ -688,6 +694,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         }
         _record_web_event(hub, actor, "activity", "insert", activity_id, event_payload)
         hub.issue_cache.pop((actor, repo, number), None)
+        hub.issue_cache.pop((actor, path_repo, path_number), None)
         await hub.publish({"type": "events", "login": actor, "count": 1})
         return JSONResponse({"url": url}, status_code=201)
 
