@@ -53,8 +53,13 @@ def github() -> FakeGitHub:
 
 @pytest.fixture
 def hub(cfg: Config, github: FakeGitHub) -> TestClient:
-    app = create_app(cfg, github=github, store=Store(cfg.database))
-    return TestClient(app)
+    store = Store(cfg.database)
+    try:
+        app = create_app(cfg, github=github, store=store)
+        with TestClient(app) as client:
+            yield client
+    finally:
+        store.close()
 
 
 @pytest.fixture
@@ -78,7 +83,13 @@ def agent_hub(cfg: Config, tmp_path: Path) -> TestClient:
             "code-helperbot": "helperbot",
         }
     )
-    return TestClient(create_app(agent_cfg, github=github, store=Store(agent_cfg.database)))
+    store = Store(agent_cfg.database)
+    try:
+        app = create_app(agent_cfg, github=github, store=store)
+        with TestClient(app) as client:
+            yield client
+    finally:
+        store.close()
 
 
 def sign_in(client: TestClient, code: str) -> None:

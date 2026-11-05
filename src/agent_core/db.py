@@ -80,12 +80,16 @@ class Store:
     def __init__(self, path: str) -> None:
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA foreign_keys = ON")
-        self._conn.execute("PRAGMA journal_mode = WAL")
-        self._conn.executescript(SCHEMA)
-        self._migrate()
-        self._conn.commit()
+        try:
+            self._conn.row_factory = sqlite3.Row
+            self._conn.execute("PRAGMA foreign_keys = ON")
+            self._conn.execute("PRAGMA journal_mode = WAL")
+            self._conn.executescript(SCHEMA)
+            self._migrate()
+            self._conn.commit()
+        except BaseException:
+            self._conn.close()
+            raise
 
     def _migrate(self) -> None:
         device_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(device)")}

@@ -138,16 +138,24 @@ def test_prs_survive_new_hub(cfg, github: FakeGitHub) -> None:
             "url": "https://github.com/acme/app/pull/7",
         }
     ]
-    store = Store(cfg.database)
-    first = TestClient(create_app(cfg, github=github, store=store))
-    sign_in(first, "code-alice")
-    assert first.get("/api/prs").json()["source"] == "github"
-    store.close()
-    second = TestClient(create_app(cfg, github=github, store=Store(cfg.database)))
-    second.cookies.update(first.cookies)
-    body = second.get("/api/prs").json()
-    assert body["source"] == "github"
-    assert [p["number"] for p in body["prs"]] == [7]
+    first_store = Store(cfg.database)
+    try:
+        with TestClient(create_app(cfg, github=github, store=first_store)) as first:
+            sign_in(first, "code-alice")
+            assert first.get("/api/prs").json()["source"] == "github"
+            cookies = dict(first.cookies)
+    finally:
+        first_store.close()
+
+    second_store = Store(cfg.database)
+    try:
+        with TestClient(create_app(cfg, github=github, store=second_store)) as second:
+            second.cookies.update(cookies)
+            body = second.get("/api/prs").json()
+            assert body["source"] == "github"
+            assert [p["number"] for p in body["prs"]] == [7]
+    finally:
+        second_store.close()
 
 
 def test_auth_me_has_no_token(hub, cfg) -> None:
@@ -161,11 +169,10 @@ def test_auth_me_has_no_token(hub, cfg) -> None:
     )
     payload = json.loads(b64decode(data))
     assert payload == {"login": "alice"}
-    store = Store(cfg.database)
-    assert store.get_oauth_token("alice") == "tok-alice"
+    assert hub.app.state.hub.store.get_oauth_token("alice") == "tok-alice"
 
 
-def test_logout_drops_token(hub, github: FakeGitHub, cfg) -> None:
+def test_logout_drops_token(hub, github: FakeGitHub) -> None:
     github._prs = [
         {
             "author": "alice",
@@ -181,8 +188,7 @@ def test_logout_drops_token(hub, github: FakeGitHub, cfg) -> None:
     assert hub.get("/api/prs").json()["source"] == "github"
     hub.post("/auth/logout")
     assert hub.get("/api/prs").status_code == 401
-    store = Store(cfg.database)
-    assert store.get_oauth_token("alice") == ""
+    assert hub.app.state.hub.store.get_oauth_token("alice") == ""
 
 
 def test_expired_github_token_asks_reauth(hub, github: FakeGitHub) -> None:
@@ -195,14 +201,13 @@ def test_expired_github_token_asks_reauth(hub, github: FakeGitHub) -> None:
     assert hub.get("/api/prs").json()["source"] == "none"
 
 
-def test_rate_limit_does_not_drop_token(hub, github: FakeGitHub, cfg) -> None:
+def test_rate_limit_does_not_drop_token(hub, github: FakeGitHub) -> None:
     sign_in(hub, "code-alice")
     github.search_status = 403
     res = hub.get("/api/prs")
     assert res.status_code == 502
     assert "HTTP 403" in res.json()["detail"]
-    store = Store(cfg.database)
-    assert store.get_oauth_token("alice") == "tok-alice"
+    assert hub.app.state.hub.store.get_oauth_token("alice") == "tok-alice"
 
 
 def test_malformed_search_items_is_502(hub, cfg, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -219,8 +224,7 @@ def test_malformed_search_items_is_502(hub, cfg, monkeypatch: pytest.MonkeyPatch
     res = hub.get("/api/prs")
     assert res.status_code == 502
     assert "HTTP 200" in res.json()["detail"]
-    store = Store(cfg.database)
-    assert store.get_oauth_token("alice") == "tok-alice"
+    assert hub.app.state.hub.store.get_oauth_token("alice") == "tok-alice"
     with pytest.raises(GitHubError, match="HTTP 200"):
         RealGitHub(cfg).search_open_prs("tok-alice", ["alice"])
 

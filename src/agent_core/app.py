@@ -7,6 +7,7 @@ import re
 import secrets
 import time
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -169,8 +170,23 @@ def can_control(hub: Hub, login: str, origin_device_id: str) -> bool:
 
 def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = None) -> FastAPI:
     roster = load_roster(cfg.teams_path)
-    hub = Hub(cfg, github or RealGitHub(cfg), store or Store(cfg.database), roster)
-    app = FastAPI(title="agent-core", version="0.1.0")
+    app_store = store if store is not None else Store(cfg.database)
+    try:
+        hub = Hub(cfg, github or RealGitHub(cfg), app_store, roster)
+    except BaseException:
+        if store is None:
+            app_store.close()
+        raise
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        try:
+            yield
+        finally:
+            if store is None:
+                app_store.close()
+
+    app = FastAPI(title="agent-core", version="0.1.0", lifespan=lifespan)
     app.add_middleware(
         SessionMiddleware,
         secret_key=cfg.session_secret,
