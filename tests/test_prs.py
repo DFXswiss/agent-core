@@ -314,9 +314,10 @@ def test_index_agent_render_preserves_forms_and_handles_fetch_lifecycle() -> Non
     html = (
         Path(__file__).resolve().parents[1] / "src" / "agent_core" / "static" / "index.html"
     ).read_text(encoding="utf-8")
+    # renderAgents delegates painting to renderAgentCards; check both together.
     render_agents = html.split("async function renderAgents", 1)[1].split(
         "function repaintAgents", 1
-    )[0]
+    )[0] + html.split("function renderAgentCards", 1)[1].split("async function renderAgents", 1)[0]
     submit_handler = html.split('document.addEventListener("submit"', 1)[1].split(
         'document.addEventListener("click"', 1
     )[0]

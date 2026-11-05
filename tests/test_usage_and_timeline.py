@@ -439,10 +439,11 @@ def test_session_page_handles_ids_and_signed_out_timeline_fetches() -> None:
     html = (
         Path(__file__).resolve().parents[1] / "src" / "agent_core" / "static" / "session.html"
     ).read_text(encoding="utf-8")
-    assert "decodeURIComponent" not in html
-    assert "const sessionId = parts[parts.length - 1] || \"\"" in html
+    load_fn = html[html.index("async function load()") :]
+    # location.pathname is percent-encoded: decode exactly once, inside load()'s try.
+    assert html.count("decodeURIComponent(") == 1
+    assert load_fn.index("try {") < load_fn.index("decodeURIComponent(")
     assert "encodeURIComponent(sessionId)" in html
-    assert "try {" in html[html.index("async function load()") :]
     assert "if (response.status === 401)" in html
     assert 'link.href = "/"' in html
     assert 'notice.replaceChildren("Signed out — ", link)' in html
