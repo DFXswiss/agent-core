@@ -57,7 +57,7 @@ Rules:
 
 An `activity` insert with `payload.type=message` must set `payload.payload.to_session` to the recipient **session id**. The hub resolves that id against the replica.
 
-`activity` rows with `payload.type=assignment.created` or `assignment.reply` are hub-authored only. A device push using either type is refused with 400; devices cannot manufacture assignment links or replies.
+`activity` rows with `payload.type=assignment.created` or `assignment.reply` are hub-authored only. A device push using either type is refused with 400; devices cannot manufacture assignment links or replies. An identical replay of an event already stored under the same `origin_seq` is still acknowledged first, as for every table.
 
 - Missing target session → 404.
 - Sender is not allowed to see the owning login of that session → 403.

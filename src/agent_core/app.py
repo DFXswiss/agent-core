@@ -113,6 +113,7 @@ class Hub:
         self.terminal_queues: list[tuple[str, str, asyncio.Queue[dict[str, Any]]]] = []
         self.github_tokens: dict[str, str] = {}
         self.issue_cache: dict[tuple[str, str, int], tuple[float, dict[str, Any]]] = {}
+        self.issue_generation: dict[tuple[str, int], int] = {}
         for login, token in self.store.all_oauth_tokens():
             self.github_tokens[login] = token
 
@@ -1908,6 +1909,7 @@ def _assignment_enrichment(
     cached = hub.issue_cache.get(key)
     if cached is not None and cached[0] > time.monotonic():
         return dict(cached[1])
+    generation = hub.issue_generation.get((repo.casefold(), number), 0)
     if time.monotonic() >= deadline:
         return {"enriched": False}
     try:
@@ -1962,7 +1964,9 @@ def _assignment_enrichment(
         "assignees": sorted(_issue_assignees(issue_row)),
         "comments": comments[:20],
     }
-    hub.issue_cache[key] = (time.monotonic() + ISSUE_CACHE_SECONDS, result)
+    # A reply during these reads bumps the generation; do not cache what it made stale.
+    if hub.issue_generation.get((repo.casefold(), number), 0) == generation:
+        hub.issue_cache[key] = (time.monotonic() + ISSUE_CACHE_SECONDS, result)
     return dict(result)
 
 
@@ -1974,6 +1978,7 @@ def _comment_id(comment: dict[str, Any]) -> int:
 def _forget_cached_issue(hub: Hub, repo: str, number: int) -> None:
     """Drop every viewer's cached copy of one issue after a reply changed it."""
     folded = repo.casefold()
+    hub.issue_generation[(folded, number)] = hub.issue_generation.get((folded, number), 0) + 1
     for key in list(hub.issue_cache):
         _viewer, cached_repo, cached_number = key
         if cached_number == number and cached_repo.casefold() == folded:
@@ -2562,8 +2567,6 @@ def _accept_event(
         raise HTTPException(status_code=400, detail="origin_seq must be a positive integer")
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="payload must be an object")
-    if table == "activity" and payload.get("type") in HUB_AUTHORED_ACTIVITY_TYPES:
-        raise HTTPException(status_code=400, detail="assignment activity is hub-authored only")
     if not isinstance(occurred, str) or occurred == "":
         raise HTTPException(status_code=400, detail="occurred_at is required")
     existing = hub.store.query_one(
@@ -2581,6 +2584,10 @@ def _accept_event(
         ):
             raise HTTPException(status_code=409, detail=f"origin_seq {seq} already exists with different content")
         return [], None
+    # Checked after the identical-replay answer, so a retried event stored before this
+    # rule existed is still acknowledged instead of blocking the device's sequence.
+    if table == "activity" and payload.get("type") in HUB_AUTHORED_ACTIVITY_TYPES:
+        raise HTTPException(status_code=400, detail="assignment activity is hub-authored only")
     notify = _session_mail_notify(hub, device, table, op, payload)
     _reject_open_session_collision(hub, origin, table, op, row_id)
     last = hub.store.query_one(

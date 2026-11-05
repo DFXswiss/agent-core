@@ -2066,6 +2066,63 @@ def test_assignment_list_comments_and_reply_authorization(agent_hub: TestClient)
     assert denied.status_code == 403
 
 
+def test_identical_replay_of_a_stored_hub_authored_event_is_acknowledged(
+    agent_hub: TestClient,
+) -> None:
+    device_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaac05"
+    token = pair_device(agent_hub, "code-alice", device_id)
+    event = {
+        "origin_device_id": device_id,
+        "origin_seq": 1,
+        "table": "activity",
+        "op": "insert",
+        "row_id": "stored-before-the-rule",
+        "payload": {"id": "stored-before-the-rule", "type": "assignment.created", "payload": {}},
+        "occurred_at": "2026-11-05T10:00:00Z",
+    }
+    agent_hub.app.state.hub.store.execute(
+        "INSERT INTO ledger_event (origin_device_id, origin_seq, table_name, op, row_id, payload, occurred_at, received_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (device_id, 1, "activity", "insert", event["row_id"], dumps(event["payload"]), event["occurred_at"], event["occurred_at"]),
+    )
+
+    replay = agent_hub.post(
+        "/sync/push", headers={"Authorization": f"Bearer {token}"}, json={"events": [event]}
+    )
+    fresh = agent_hub.post(
+        "/sync/push",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"events": [dict(event, origin_seq=2, row_id="new-forgery")]},
+    )
+
+    assert replay.status_code == 200, replay.text
+    assert fresh.status_code == 400
+    assert fresh.json()["detail"] == "assignment activity is hub-authored only"
+
+
+def test_enrichment_racing_a_reply_does_not_cache_stale_comments(
+    agent_hub: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    assert agent_hub.post("/api/assignments", json=ASSIGNMENT).status_code == 201
+    hub = agent_hub.app.state.hub
+    github: FakeGitHub = hub.github
+    read_comments = github.issue_comments
+
+    def comments_then_reply(*args, **kwargs):
+        rows = read_comments(*args, **kwargs)
+        app_module._forget_cached_issue(hub, "Acme/Widget", 1)
+        return rows
+
+    monkeypatch.setattr(github, "issue_comments", comments_then_reply)
+
+    listed = agent_hub.get("/api/assignments", params={"agent": "helperbot"})
+
+    assert listed.status_code == 200
+    assert listed.json()["assignments"][0]["enriched"] is True
+    assert not [key for key in hub.issue_cache if key[2] == 1]
+
+
 @pytest.mark.parametrize("activity_type", ["assignment.created", "assignment.reply"])
 def test_device_cannot_push_hub_authored_assignment_activity(
     agent_hub: TestClient, activity_type: str
