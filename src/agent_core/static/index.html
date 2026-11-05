@@ -274,6 +274,7 @@
     }
 
     let openSessionId = null;
+    let sessionOpenGeneration = 0;
     let termEs = null;
     let openCanControl = false;
     let renderGen = 0;
@@ -853,6 +854,7 @@
     }
 
     function closeSessionDetail() {
+      sessionOpenGeneration += 1;
       openSessionId = null;
       openCanControl = false;
       document.getElementById("session-detail").classList.add("hidden");
@@ -870,6 +872,9 @@
     }
 
     async function openSession(id) {
+      // A later open or close supersedes this one; its late answer must not
+      // repaint the detail or open a second terminal stream.
+      const generation = ++sessionOpenGeneration;
       if (termEs) {
         termEs.close();
         termEs = null;
@@ -877,8 +882,10 @@
       openSessionId = id;
       document.getElementById("term").textContent = "";
       const res = await fetch("/api/session?id=" + encodeURIComponent(id));
+      if (generation !== sessionOpenGeneration) return;
       if (!res.ok) throw new Error("HTTP " + res.status);
       const s = await res.json();
+      if (generation !== sessionOpenGeneration) return;
       document.getElementById("session-detail").classList.remove("hidden");
       const p = s.payload || {};
       document.getElementById("session-meta").textContent =

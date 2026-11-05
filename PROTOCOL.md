@@ -9,7 +9,7 @@ Anyone may sign in with GitHub. Authorization is not the login; it is team membe
 - A user always reads and writes their own store.
 - A user listed on a team in `teams.yaml` also reads every member of that team.
 - Membership changes only through a pull request to `teams.yaml`.
-- The optional top-level `agents` map assigns owners to agent GitHub logins. Agent and owner logins are lowercase, the agent must belong to a team, and every owner must share a team with it. Duplicate owners, self-ownership, and invalid references fail closed.
+- The optional top-level `agents` map assigns owners to agent GitHub logins. Agent and owner logins are lowercase, the agent must belong to a team, and every owner must share a team with it. Duplicate owners, a key written twice anywhere in the file, self-ownership, and invalid references fail closed.
 
 ## Device pairing
 
@@ -302,7 +302,7 @@ Creation records an `activity` replica with type `assignment.created`; replies r
 {"match":{"type":"assignment.created","payload.issue_key":"Owner/Name#42"}}
 ```
 
-Every GitHub request, read or write, is bounded by one total 20-second deadline; enrichment and recovery requests use their smaller remaining budget. GitHub transport errors return bounded 502 messages.
+Every GitHub API request of the assignment, reply and enrichment paths, read or write, is bounded by one total 20-second deadline; enrichment and recovery requests use their smaller remaining budget. Sign-in (OAuth token exchange and user lookup) and the PR list search keep their existing per-phase 20-second timeouts. GitHub transport errors return bounded 502 messages.
 
 `POST /api/assignments/{owner}/{name}/{number}/comments` accepts a website cookie or a paired device bearer belonging to an owner of an agent currently assigned to the issue. The body is `{body: 1..60000 chars, request_id?}`; `request_id`, when present, has the same lowercase UUID validation as assignment creation. When `request_id` is present, the GitHub comment ends with the same request marker line. The hub fingerprints normalized `owner`, `name`, `number`, and `body`, with owner and name case-folded for the fingerprint only, then replays a recorded `assignment.reply`, or uses the same reservation, content-conflict, busy, and bounded marker-recovery rules instead of posting twice. Success is 201 `{"url":"..."}` and an already-recorded replay is 200 `{"url":"<stored url>"}`. The response is 403 when the actor owns no agent assigned to the issue, and 409 when the actor's GitHub token must be renewed. An agent's own device bearer does not gain owner rights.
 

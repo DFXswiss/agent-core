@@ -55,7 +55,7 @@ agents:
 
 Logins are compared in lowercase. A login that appears on no team still signs in and still syncs; they only see themselves.
 
-The optional `agents` map declares GitHub logins operated by autonomous agents. An agent must be a team member, and each owner must share at least one team with that agent. Owners can pair a device as the agent from the website, control its sessions, create GitHub issue assignments, and reply to assignment comments. An agent cannot own itself, duplicate owners are rejected, and a malformed roster fails closed at startup.
+The optional `agents` map declares GitHub logins operated by autonomous agents. An agent must be a team member, and each owner must share at least one team with that agent. Owners can pair a device as the agent from the website, control its sessions, create GitHub issue assignments, and reply to assignment comments. An agent cannot own itself, duplicate owners and any key written twice in the file are rejected, and a malformed roster fails closed at startup.
 
 ## Protocol
 

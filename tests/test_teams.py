@@ -83,6 +83,21 @@ def test_roster_error_branches_are_fail_closed(
         load_roster(path)
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "teams:\n  core:\n    members: [alice, helper]\nagents:\n  helper: [alice]\n  helper: [bob]\n",
+        "teams:\n  core:\n    members: [alice]\n  core:\n    members: [bob]\n",
+        "teams:\n  core:\n    members: [alice]\nteams:\n  other:\n    members: [bob]\n",
+    ],
+)
+def test_roster_refuses_a_key_written_twice(tmp_path: Path, raw: str) -> None:
+    path = tmp_path / "duplicate-teams.yaml"
+    path.write_text(raw, encoding="utf-8")
+    with pytest.raises(TeamsError, match="duplicate key"):
+        load_roster(path)
+
+
 def test_visible_logins_rejects_an_empty_login() -> None:
     with pytest.raises(TeamsError, match="login must be a non-empty string"):
         visible_logins(" ", {})

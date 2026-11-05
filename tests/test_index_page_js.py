@@ -950,3 +950,67 @@ process.stdout.write(JSON.stringify({{
     assert out["self"] == {"challenge": "c1"}
     assert out["agent"] == {"challenge": "c2", "as_login": "zetabot"}
     assert out["empty"] == {"challenge": "c3"}
+
+
+def test_open_session_ignores_a_superseded_answer() -> None:
+    node = shutil.which("node")
+    assert node is not None, "node is required to run the dashboard page test"
+    function = _extract(_index_html(), "openSession")
+    script = f"""
+let termEs = null;
+let openSessionId = null;
+let sessionOpenGeneration = 0;
+let openCanControl = false;
+const streams = [];
+class EventSource {{
+  constructor(url) {{ this.url = url; this.closed = false; streams.push(this); }}
+  close() {{ this.closed = true; }}
+}}
+const elements = {{}};
+const document = {{
+  getElementById(id) {{
+    if (!elements[id]) {{
+      elements[id] = {{
+        id, textContent: "", disabled: false,
+        classList: {{ add() {{}}, remove() {{}}, toggle() {{}} }},
+      }};
+    }}
+    return elements[id];
+  }},
+}};
+function setControlEnabled() {{}}
+function appendTermChunk() {{}}
+const pending = {{}};
+function fetch(url) {{
+  const id = decodeURIComponent(url.split("id=")[1]);
+  return new Promise(resolve => {{ pending[id] = resolve; }});
+}}
+function answer(id) {{
+  pending[id]({{ ok: true, status: 200, json: async () => ({{
+    id, payload: {{ host: "h", status: "active" }}, can_control: true, control_connected: true,
+  }}) }});
+}}
+{function}
+(async () => {{
+  const first = openSession("session-a");
+  const second = openSession("session-b");
+  answer("session-b");
+  await second;
+  answer("session-a");
+  await first;
+  process.stdout.write(JSON.stringify({{
+    openSessionId,
+    meta: document.getElementById("session-meta").textContent,
+    streams: streams.map(s => ({{ url: s.url, closed: s.closed }})),
+  }}));
+}})();
+"""
+    result = subprocess.run(
+        [node, "-"], input=script, capture_output=True, text=True, check=True, timeout=30
+    )
+    state = json.loads(result.stdout)
+    assert state["openSessionId"] == "session-b"
+    assert state["meta"].startswith("id=session-b ")
+    assert state["streams"] == [
+        {"url": "/api/session/terminal?id=session-b", "closed": False}
+    ]

@@ -29,10 +29,31 @@ class Roster:
         return sorted(agent for agent, owners in self.agents.items() if login in owners)
 
 
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """Safe loader that refuses a mapping key written twice instead of keeping the last."""
+
+
+def _construct_unique_mapping(loader: yaml.SafeLoader, node: yaml.MappingNode) -> dict:
+    keys: set[Any] = set()
+    for key_node, _value_node in node.value:
+        key = loader.construct_object(key_node, deep=True)
+        if key in keys:
+            raise yaml.constructor.ConstructorError(
+                None, None, f"duplicate key {key!r}", key_node.start_mark
+            )
+        keys.add(key)
+    return loader.construct_mapping(node, deep=True)
+
+
+_UniqueKeyLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_unique_mapping
+)
+
+
 def load_roster(path: Path) -> Roster:
     raw = path.read_text(encoding="utf-8")
     try:
-        data = yaml.safe_load(raw)
+        data = yaml.load(raw, Loader=_UniqueKeyLoader)  # noqa: S506 - SafeLoader subclass
     except yaml.YAMLError as exc:
         raise TeamsError(f"teams file is not valid YAML: {path}: {exc}") from exc
     if not isinstance(data, dict) or "teams" not in data:

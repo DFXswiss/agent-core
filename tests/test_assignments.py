@@ -3273,6 +3273,32 @@ def test_real_github_deadline_watchdog_runs_before_connect(
     ]
 
 
+@pytest.mark.parametrize("encoding", ["gzip", "deflate"])
+def test_real_github_reads_compressed_responses(cfg, encoding: str) -> None:
+    import gzip
+    import zlib
+
+    def compress(data: bytes) -> bytes:
+        return gzip.compress(data) if encoding == "gzip" else zlib.compress(data)
+
+    def request(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            body = json.dumps(
+                {"number": 7, "html_url": "https://github.com/Acme/Widget/issues/7"}
+            ).encode()
+            return httpx.Response(201, headers={"Content-Encoding": encoding}, content=compress(body))
+        body = json.dumps([{"id": 1, "body": "hello", "user": {"login": "alice"}}]).encode()
+        return httpx.Response(200, headers={"Content-Encoding": encoding}, content=compress(body))
+
+    github = RealGitHub(cfg, transport=httpx.MockTransport(request))
+
+    created = github.create_issue("tok-alice", "Acme/Widget", "title", "body", [])
+    comments = github.issue_comments("tok-alice", "Acme/Widget", 7)
+
+    assert created["number"] == 7
+    assert comments[0]["body"] == "hello"
+
+
 def test_assignment_github_calls_use_to_thread(
     agent_hub: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

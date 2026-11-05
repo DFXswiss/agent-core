@@ -18,6 +18,7 @@ GITHUB_API_URL = "https://api.github.com"
 REPOSITORY_OWNER_RE = re.compile(r"^[A-Za-z0-9-]{1,39}$")
 REPOSITORY_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
 GITHUB_REQUEST_TIMEOUT = 20.0
+_ENCODED_BODY_HEADERS = frozenset({"content-encoding", "content-length", "transfer-encoding"})
 GITHUB_PAGE_SIZE = 100
 GITHUB_RECOVERY_PAGE_LIMIT = 100
 
@@ -394,9 +395,16 @@ class RealGitHub(GitHub):
                     _check_deadline(deadline)
                     chunks.append(chunk)
                 _check_deadline(deadline)
+                # iter_bytes() already decoded the body; drop the headers that describe
+                # the encoded bytes so the rebuilt response does not decode it again.
+                headers = [
+                    (key, value)
+                    for key, value in response.headers.multi_items()
+                    if key.lower() not in _ENCODED_BODY_HEADERS
+                ]
                 return httpx.Response(
                     response.status_code,
-                    headers=response.headers,
+                    headers=headers,
                     content=b"".join(chunks),
                     request=response.request,
                 )
