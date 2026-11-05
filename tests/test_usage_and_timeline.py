@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from agent_core.db import dumps
@@ -365,18 +366,13 @@ def test_timeline_truncates_at_5000(agent_hub: TestClient) -> None:
     assert all(row["table"] != "session" for row in body["timeline"])
 
 
-def test_session_page_reads_real_lane_tool_payload_with_legacy_fallback() -> None:
+def test_session_page_renders_only_the_hub_tool_view() -> None:
     html = (
         Path(__file__).resolve().parents[1] / "src" / "agent_core" / "static" / "session.html"
     ).read_text(encoding="utf-8")
 
-    assert "function toolCallRows(inner)" in html
-    assert "const calls = Array.isArray(inner.tools)" in html
-    assert ": (Array.isArray(inner.tool_calls) ? inner.tool_calls : [])" in html
-    assert "tool: call.tool || call.name || \"tool\"" in html
-    assert "target: call.target || call.path || call.command || \"\"" in html
-    assert 'error: call.error || (call.status === "error" ? "error" : "")' in html
-    assert "truncated: !!inner.tools_truncated" in html
+    assert "toolCalls(row.tools)" in html
+    assert "tool_calls" not in html
     assert "Tool list truncated." in html
 
 
@@ -426,13 +422,18 @@ def test_timeline_preserves_the_tool_renderer_contract(agent_hub: TestClient) ->
 
     response = agent_hub.get("/api/sessions/tool-contract-session/timeline")
     assert response.status_code == 200
-    rows = {row["row_id"]: row["payload"]["payload"] for row in response.json()["timeline"] if row["table"] == "activity"}
-    assert rows["tool-contract-primary"] == {
-        "tools": [{"tool": "Read", "target": "README.md", "error": "denied"}],
-        "tool_calls": [{"name": "Legacy", "path": "ignored"}],
+    views = {
+        row["row_id"]: row["tools"]
+        for row in response.json()["timeline"]
+        if row["table"] == "activity"
     }
-    assert rows["tool-contract-truncated"]["tools"] == []
-    assert rows["tool-contract-truncated"]["tools_truncated"] is True
+    # inner tools wins over legacy tool_calls
+    assert views["tool-contract-primary"] == {
+        "calls": [{"tool": "Read", "target": "README.md", "error": "denied"}],
+        "truncated": False,
+    }
+    # an empty tools list still wins, and the truncation flag survives
+    assert views["tool-contract-truncated"] == {"calls": [], "truncated": True}
 
 
 def test_session_page_handles_ids_and_signed_out_timeline_fetches() -> None:
@@ -447,3 +448,62 @@ def test_session_page_handles_ids_and_signed_out_timeline_fetches() -> None:
     assert "if (response.status === 401)" in html
     assert 'link.href = "/"' in html
     assert 'notice.replaceChildren("Signed out — ", link)' in html
+
+
+@pytest.mark.parametrize(
+    ("inner", "expected"),
+    [
+        (
+            {"tool_calls": [{"name": "Bash", "command": "ls", "status": "error"}]},
+            {"calls": [{"tool": "Bash", "target": "ls", "error": "error"}], "truncated": False},
+        ),
+        (
+            {"tool_calls": [{"name": "Edit", "path": "a.py", "status": "ok"}]},
+            {"calls": [{"tool": "Edit", "target": "a.py", "error": ""}], "truncated": False},
+        ),
+        (
+            {"tools": [{"tool": "Read", "target": "b.py", "error": True}, "junk", {}]},
+            {
+                "calls": [
+                    {"tool": "Read", "target": "b.py", "error": "error"},
+                    {"tool": "tool", "target": "", "error": ""},
+                ],
+                "truncated": False,
+            },
+        ),
+        (
+            {"tools": [{"tool": "Grep", "target": "x", "error": False}], "tools_truncated": "yes"},
+            {"calls": [{"tool": "Grep", "target": "x", "error": ""}], "truncated": False},
+        ),
+        ({}, {"calls": [], "truncated": False}),
+    ],
+)
+def test_timeline_tool_view_maps_fields_and_legacy_fallback(
+    agent_hub: TestClient, inner: dict, expected: dict
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    _insert_replica(
+        agent_hub,
+        table="session",
+        row_id="tool-view-session",
+        updated_at="2026-11-05T09:00:00Z",
+        login="helperbot",
+        payload={"id": "tool-view-session", "created_at": "2026-11-05T09:00:00Z"},
+    )
+    _insert_replica(
+        agent_hub,
+        table="activity",
+        row_id="tool-view-run",
+        updated_at="2026-11-05T09:01:00Z",
+        login="helperbot",
+        payload={
+            "id": "tool-view-run",
+            "type": "lane.run",
+            "session_id": "tool-view-session",
+            "payload": inner,
+        },
+    )
+    timeline = agent_hub.get("/api/sessions/tool-view-session/timeline").json()["timeline"]
+    run = next(row for row in timeline if row["row_id"] == "tool-view-run")
+    assert run["tools"] == expected
+    assert all("tools" not in row for row in timeline if row["row_id"] != "tool-view-run")

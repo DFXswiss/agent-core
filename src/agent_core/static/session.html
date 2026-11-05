@@ -33,29 +33,15 @@
         return null;
       }
     }
-    function toolCallRows(inner) {
-      const calls = Array.isArray(inner.tools)
-        ? inner.tools
-        : (Array.isArray(inner.tool_calls) ? inner.tool_calls : []);
-      return {
-        calls: calls.map(call => ({
-          tool: call.tool || call.name || "tool",
-          target: call.target || call.path || call.command || "",
-          error: call.error || (call.status === "error" ? "error" : ""),
-        })),
-        truncated: !!inner.tools_truncated,
-      };
-    }
-
-    function toolCalls(inner) {
-      const rows = toolCallRows(inner);
+    // The hub normalises the tool list (row.tools); the page only escapes and lists it.
+    function toolCalls(view) {
+      const rows = view && Array.isArray(view.calls) ? view : {calls: [], truncated: false};
       const truncated = rows.truncated
         ? '<p class="muted">Tool list truncated.</p>'
         : "";
       if (!rows.calls.length) return truncated;
       return "<ul>" + rows.calls.map(call => {
-        const rawError = call.error;
-        const error = rawError === true ? "error" : rawError;
+        const error = call.error;
         return `<li class="${error ? "error" : ""}">${esc(call.tool)} ${esc(call.target)}${error ? " — " + esc(error) : ""}</li>`;
       }).join("") + "</ul>" + truncated;
     }
@@ -67,7 +53,7 @@
         const usage = inner.usage || payload.usage || {};
         return `role=${esc(inner.role || payload.role)} provider=${esc(inner.vendor || inner.provider || payload.vendor)} ` +
           `model=${esc(inner.model || payload.model)} status=${esc(inner.status || payload.status)} ` +
-          `tokens=${esc(usage.input_tokens || 0)}/${esc(usage.output_tokens || 0)}` + toolCalls(inner);
+          `tokens=${esc(usage.input_tokens || 0)}/${esc(usage.output_tokens || 0)}` + toolCalls(row.tools);
       }
       if (row.table === "task") {
         const coordinator = payload.coordinator || {};

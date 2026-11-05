@@ -1361,13 +1361,54 @@ def _payload_relation(payload: dict[str, Any], key: str) -> str:
     return value if isinstance(value, str) else ""
 
 
+def _tool_text(call: dict[str, Any], keys: tuple[str, ...]) -> str:
+    for key in keys:
+        value = call.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+def _lane_tool_view(payload: dict[str, Any]) -> dict[str, Any]:
+    """Normalise a lane run's tool list for display.
+
+    The producer writes inner ``tools``; legacy inner ``tool_calls`` is used only
+    when ``tools`` is not a list, so an empty ``tools`` list wins.
+    """
+    inner = _activity_inner(payload)
+    tools = inner.get("tools")
+    raw = tools if isinstance(tools, list) else inner.get("tool_calls")
+    calls: list[dict[str, str]] = []
+    for call in raw if isinstance(raw, list) else []:
+        if not isinstance(call, dict):
+            continue
+        error = call.get("error")
+        if error is True or (not error and call.get("status") == "error"):
+            error_text = "error"
+        elif isinstance(error, str):
+            error_text = error
+        else:
+            error_text = ""
+        calls.append(
+            {
+                "tool": _tool_text(call, ("tool", "name")) or "tool",
+                "target": _tool_text(call, ("target", "path", "command")),
+                "error": error_text,
+            }
+        )
+    return {"calls": calls, "truncated": inner.get("tools_truncated") is True}
+
+
 def _timeline_item(row: Any, payload: dict[str, Any]) -> dict[str, Any]:
-    return {
+    item = {
         "table": row["table_name"],
         "row_id": row["row_id"],
         "at": _row_time(payload, row["updated_at"]),
         "payload": payload,
     }
+    if row["table_name"] == "activity" and payload.get("type") == "lane.run":
+        item["tools"] = _lane_tool_view(payload)
+    return item
 
 
 def _session_timeline(hub: Hub, session_row: Any, allowed: set[str]) -> list[dict[str, Any]]:
