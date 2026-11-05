@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import re
 import secrets
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -113,7 +114,9 @@ class Hub:
         self.terminal_queues: list[tuple[str, str, asyncio.Queue[dict[str, Any]]]] = []
         self.github_tokens: dict[str, str] = {}
         self.issue_cache: dict[tuple[str, str, int], tuple[float, dict[str, Any]]] = {}
-        self.issue_generation: dict[tuple[str, int], int] = {}
+        # Bumped by every reply invalidation; an enrichment caches only if it is unchanged.
+        self.issue_cache_epoch = 0
+        self.issue_cache_lock = threading.Lock()
         for login, token in self.store.all_oauth_tokens():
             self.github_tokens[login] = token
 
@@ -771,10 +774,21 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                 hub.store.expire_request(
                     actor, "assignment.created", request_id, request_owner
                 )
-                raise HTTPException(
-                    status_code=409,
-                    detail="request is still in progress; retry shortly",
-                ) from exc
+                # Keep the reservation; only an unfinished read is "in progress".
+                if exc.status_code is None:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="request is still in progress; retry shortly",
+                    ) from exc
+                recovery_failure: dict[str, Any] = {"detail": _bounded_github_error(exc)}
+                if issue_created and url:
+                    recovery_failure["url"] = url
+                if issue_created and number is not None:
+                    recovery_failure["number"] = number
+                return JSONResponse(
+                    _request_id_error_content(request, 502, recovery_failure),
+                    status_code=502,
+                )
             if issue_created:
                 failure: dict[str, Any] = {"detail": _bounded_github_error(exc)}
                 if url:
@@ -1097,10 +1111,13 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                 hub.store.expire_request(
                     actor, "assignment.reply", request_id, request_owner
                 )
-                raise HTTPException(
-                    status_code=409,
-                    detail="request is still in progress; retry shortly",
-                ) from exc
+                # Keep the reservation; only an unfinished read is "in progress".
+                if exc.status_code is None:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="request is still in progress; retry shortly",
+                    ) from exc
+                raise HTTPException(status_code=502, detail=_bounded_github_error(exc)) from exc
             if (
                 request_id is not None
                 and not getattr(request.state, "request_id_prior_write", False)
@@ -1909,7 +1926,7 @@ def _assignment_enrichment(
     cached = hub.issue_cache.get(key)
     if cached is not None and cached[0] > time.monotonic():
         return dict(cached[1])
-    generation = hub.issue_generation.get((repo.casefold(), number), 0)
+    epoch = hub.issue_cache_epoch
     if time.monotonic() >= deadline:
         return {"enriched": False}
     try:
@@ -1964,9 +1981,10 @@ def _assignment_enrichment(
         "assignees": sorted(_issue_assignees(issue_row)),
         "comments": comments[:20],
     }
-    # A reply during these reads bumps the generation; do not cache what it made stale.
-    if hub.issue_generation.get((repo.casefold(), number), 0) == generation:
-        hub.issue_cache[key] = (time.monotonic() + ISSUE_CACHE_SECONDS, result)
+    # A reply during these reads bumps the epoch; do not cache what it may have made stale.
+    with hub.issue_cache_lock:
+        if hub.issue_cache_epoch == epoch:
+            hub.issue_cache[key] = (time.monotonic() + ISSUE_CACHE_SECONDS, result)
     return dict(result)
 
 
@@ -1978,11 +1996,12 @@ def _comment_id(comment: dict[str, Any]) -> int:
 def _forget_cached_issue(hub: Hub, repo: str, number: int) -> None:
     """Drop every viewer's cached copy of one issue after a reply changed it."""
     folded = repo.casefold()
-    hub.issue_generation[(folded, number)] = hub.issue_generation.get((folded, number), 0) + 1
-    for key in list(hub.issue_cache):
-        _viewer, cached_repo, cached_number = key
-        if cached_number == number and cached_repo.casefold() == folded:
-            hub.issue_cache.pop(key, None)
+    with hub.issue_cache_lock:
+        hub.issue_cache_epoch += 1
+        for key in list(hub.issue_cache):
+            _viewer, cached_repo, cached_number = key
+            if cached_number == number and cached_repo.casefold() == folded:
+                hub.issue_cache.pop(key, None)
 
 
 def _prune_issue_cache(hub: Hub) -> None:

@@ -1553,6 +1553,47 @@ def test_recovering_create_keeps_its_lease_after_an_uncertain_write(
     assert create_calls == [1]
 
 
+@pytest.mark.parametrize(("status_code", "expected"), [(None, 409), (403, 502), (404, 502)])
+def test_recovering_reply_reports_a_lasting_github_error_and_keeps_the_reservation(
+    agent_hub: TestClient, monkeypatch: pytest.MonkeyPatch, status_code, expected: int
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    assert agent_hub.post("/api/assignments", json=ASSIGNMENT).status_code == 201
+    hub = agent_hub.app.state.hub
+    github: FakeGitHub = hub.github
+    create_comment = github.create_issue_comment
+
+    def comment_then_timeout(*args, **kwargs):
+        create_comment(*args, **kwargs)
+        raise GitHubError("GitHub request failed: ReadTimeout")
+
+    monkeypatch.setattr(github, "create_issue_comment", comment_then_timeout)
+    payload = {"body": "A reply.", "request_id": REQUEST_ID}
+    assert agent_hub.post(
+        "/api/assignments/Acme/Widget/1/comments", json=payload
+    ).status_code == 502
+    hub.store.execute(
+        "UPDATE request_reservation SET lease_until = ? WHERE request_id = ?",
+        ("2000-01-01T00:00:00Z", REQUEST_ID),
+    )
+
+    def failing_lookup(*_args, **_kwargs):
+        raise GitHubError(f"GitHub request failed: HTTP {status_code}", status_code=status_code)
+
+    monkeypatch.setattr(github, "issue_comments", failing_lookup)
+    recovering = agent_hub.post("/api/assignments/Acme/Widget/1/comments", json=payload)
+    reservation = hub.store.query_one(
+        "SELECT status, prior_write FROM request_reservation WHERE request_id = ?",
+        (REQUEST_ID,),
+    )
+
+    assert recovering.status_code == expected
+    assert recovering.json()["request_id_final"] is False
+    if expected == 502:
+        assert f"HTTP {status_code}" in recovering.json()["detail"]
+    assert dict(reservation) == {"status": "pending", "prior_write": 1}
+
+
 def test_concurrent_assignment_requests_create_one_issue(
     agent_hub: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
