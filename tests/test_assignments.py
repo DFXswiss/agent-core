@@ -71,6 +71,23 @@ class _InvalidJSONResponse(_Response):
         raise ValueError("invalid JSON")
 
 
+class _SlowByteStream(httpx.SyncByteStream):
+    def __init__(
+        self,
+        chunks: list[bytes],
+        clock: list[float],
+        seconds_per_chunk: float,
+    ) -> None:
+        self._chunks = chunks
+        self._clock = clock
+        self._seconds_per_chunk = seconds_per_chunk
+
+    def __iter__(self):
+        for chunk in self._chunks:
+            self._clock[0] += self._seconds_per_chunk
+            yield chunk
+
+
 def test_real_github_error_exposes_http_status(
     cfg, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -923,6 +940,66 @@ def test_assignment_recovery_error_is_retryable_and_does_not_write(
     ) == []
 
 
+def test_assignment_reply_recovery_stream_deadline_does_not_start_write(
+    agent_hub: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    assert agent_hub.post("/api/assignments", json=ASSIGNMENT).status_code == 201
+    hub = agent_hub.app.state.hub
+    github: FakeGitHub = hub.github
+    create_comment = github.create_issue_comment
+
+    def comment_then_timeout(*args, **kwargs):
+        create_comment(*args, **kwargs)
+        raise GitHubError("GitHub request failed: ReadTimeout")
+
+    monkeypatch.setattr(github, "create_issue_comment", comment_then_timeout)
+    payload = {"body": "A reply.", "request_id": REQUEST_ID}
+    assert agent_hub.post(
+        "/api/assignments/Acme/Widget/1/comments", json=payload
+    ).status_code == 502
+    monkeypatch.setattr(github, "create_issue_comment", create_comment)
+    hub.store.execute(
+        "UPDATE request_reservation SET lease_until = ? WHERE request_id = ?",
+        ("2000-01-01T00:00:00Z", REQUEST_ID),
+    )
+    clock = [0.0]
+    body = dumps(github.comments[("Acme/Widget", 1)]).encode()
+
+    def request(_request: httpx.Request) -> httpx.Response:
+        middle = len(body) // 2
+        return httpx.Response(
+            200,
+            stream=_SlowByteStream(
+                [body[:middle], body[middle:]], clock, 6.0
+            ),
+        )
+
+    recovery_github = RealGitHub(
+        hub.cfg,
+        transport=httpx.MockTransport(request),
+    )
+    monkeypatch.setattr(github, "issue_comments", recovery_github.issue_comments)
+    monkeypatch.setattr(app_module.time, "monotonic", lambda: clock[0])
+    response = agent_hub.post(
+        "/api/assignments/Acme/Widget/1/comments", json=payload
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "request is still in progress; retry shortly",
+        "request_id_final": False,
+    }
+    assert len(
+        [
+            call
+            for call in github.issue_calls
+            if call["operation"] == "create_issue_comment"
+        ]
+    ) == 1
+    assert len(github.comments[("Acme/Widget", 1)]) == 1
+
+
 def test_assignment_request_is_busy_without_calling_github(
     agent_hub: TestClient,
 ) -> None:
@@ -1270,6 +1347,71 @@ def test_assignment_reply_releases_reservation_after_prewrite_denial(
     assert denied.status_code == 403
     assert retried.status_code == 201, retried.text
     assert issue_calls == 2
+
+
+def test_assignment_reply_keeps_prior_write_reservation_after_ownership_denial(
+    agent_hub: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    assert agent_hub.post("/api/assignments", json=ASSIGNMENT).status_code == 201
+    hub = agent_hub.app.state.hub
+    github: FakeGitHub = hub.github
+    create_comment = github.create_issue_comment
+
+    def comment_then_timeout(*args, **kwargs):
+        create_comment(*args, **kwargs)
+        raise GitHubError("GitHub request failed: ReadTimeout")
+
+    monkeypatch.setattr(github, "create_issue_comment", comment_then_timeout)
+    payload = {"body": "A reply.", "request_id": REQUEST_ID}
+    assert agent_hub.post(
+        "/api/assignments/Acme/Widget/1/comments", json=payload
+    ).status_code == 502
+    monkeypatch.setattr(github, "create_issue_comment", create_comment)
+    hub.store.execute(
+        "UPDATE request_reservation SET lease_until = ? WHERE request_id = ?",
+        ("2000-01-01T00:00:00Z", REQUEST_ID),
+    )
+    issue = github.issue
+    deny_ownership = True
+
+    def deny_once(*args, **kwargs):
+        nonlocal deny_ownership
+        row = issue(*args, **kwargs)
+        if deny_ownership:
+            deny_ownership = False
+            row["assignees"] = []
+        return row
+
+    monkeypatch.setattr(github, "issue", deny_once)
+    denied = agent_hub.post(
+        "/api/assignments/Acme/Widget/1/comments", json=payload
+    )
+    reservation = hub.store.query_one(
+        "SELECT status, lease_until, prior_write FROM request_reservation "
+        "WHERE request_id = ?",
+        (REQUEST_ID,),
+    )
+    recovered = agent_hub.post(
+        "/api/assignments/Acme/Widget/1/comments", json=payload
+    )
+
+    assert denied.status_code == 403
+    assert reservation is not None
+    assert dict(reservation) == {
+        "status": "pending",
+        "lease_until": "",
+        "prior_write": 1,
+    }
+    assert recovered.status_code == 201, recovered.text
+    assert len(
+        [
+            call
+            for call in github.issue_calls
+            if call["operation"] == "create_issue_comment"
+        ]
+    ) == 1
+    assert len(github.comments[("Acme/Widget", 1)]) == 1
 
 
 def test_concurrent_assignment_requests_create_one_issue(
@@ -2018,27 +2160,24 @@ def test_assignment_comments_read_three_pages_with_remaining_timeouts(
     sign_in(agent_hub, "code-alice")
     assert agent_hub.post("/api/assignments", json=ASSIGNMENT).status_code == 201
     hub = agent_hub.app.state.hub
-    hub.github = RealGitHub(hub.cfg)
     clock = [0.0]
     calls: list[tuple[int, float]] = []
 
-    def request(_method: str, url: str, **kwargs: object) -> _Response:
-        timeout = kwargs["timeout"]
+    def request(request: httpx.Request) -> httpx.Response:
+        timeout = request.extensions["timeout"]["read"]
         assert isinstance(timeout, float)
-        if not url.endswith("/comments"):
+        if not request.url.path.endswith("/comments"):
             calls.append((0, timeout))
             clock[0] = 1.0
-            return _Response(
+            return httpx.Response(
                 200,
-                {
+                json={
                     "number": 1,
                     "state": "open",
                     "assignees": [{"login": "helperbot"}],
                 },
             )
-        params = kwargs["params"]
-        assert isinstance(params, dict)
-        page = int(params.get("page", 1))
+        page = int(request.url.params.get("page", "1"))
         calls.append((page, timeout))
         start = (page - 1) * 100 + 1
         end = min(page * 100, 205)
@@ -2069,10 +2208,10 @@ def test_assignment_comments_read_three_pages_with_remaining_timeouts(
                     '<https://api.github.com/repos/Acme/Widget/issues/1/comments?per_page=100&page=3>; rel="last"'
                 )
             }
-        return _Response(200, rows, headers)
+        return httpx.Response(200, json=rows, headers=headers)
 
     monkeypatch.setattr(app_module.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(httpx, "request", request)
+    hub.github = RealGitHub(hub.cfg, transport=httpx.MockTransport(request))
     response = agent_hub.get("/api/assignments", params={"agent": "helperbot"})
 
     assert response.status_code == 200
@@ -2089,22 +2228,24 @@ def test_assignment_comment_pagination_error_discards_partial_enrichment(
     sign_in(agent_hub, "code-alice")
     assert agent_hub.post("/api/assignments", json=ASSIGNMENT).status_code == 201
     hub = agent_hub.app.state.hub
-    hub.github = RealGitHub(hub.cfg)
 
-    def request(_method: str, url: str, **kwargs: object) -> _Response:
-        if not url.endswith("/comments"):
-            return _Response(
+    def request(request: httpx.Request) -> httpx.Response:
+        if not request.url.path.endswith("/comments"):
+            return httpx.Response(
                 200,
-                {"state": "open", "assignees": [{"login": "helperbot"}]},
+                json={"state": "open", "assignees": [{"login": "helperbot"}]},
             )
-        params = kwargs["params"]
-        assert isinstance(params, dict)
-        if params.get("page") == 2:
-            raise httpx.ReadTimeout("second comment page timed out")
-        return _Response(
+        if request.url.params.get("page") == "2":
+            raise httpx.ReadTimeout(
+                "second comment page timed out", request=request
+            )
+        return httpx.Response(
             200,
-            [{"id": index, "created_at": str(index), "body": str(index)} for index in range(100)],
-            {
+            json=[
+                {"id": index, "created_at": str(index), "body": str(index)}
+                for index in range(100)
+            ],
+            headers={
                 "Link": (
                     '<https://api.github.com/repos/Acme/Widget/issues/1/comments?per_page=100&page=2>; rel="next", '
                     '<https://api.github.com/repos/Acme/Widget/issues/1/comments?per_page=100&page=2>; rel="last"'
@@ -2112,13 +2253,49 @@ def test_assignment_comment_pagination_error_discards_partial_enrichment(
             },
         )
 
-    monkeypatch.setattr(httpx, "request", request)
+    hub.github = RealGitHub(hub.cfg, transport=httpx.MockTransport(request))
     response = agent_hub.get("/api/assignments", params={"agent": "helperbot"})
 
     assert response.status_code == 200
     row = response.json()["assignments"][0]
     assert row["enriched"] is False
     assert "comments" not in row
+
+
+def test_assignment_enrichment_stops_at_deadline_during_streamed_body(
+    agent_hub: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    assert agent_hub.post("/api/assignments", json=ASSIGNMENT).status_code == 201
+    hub = agent_hub.app.state.hub
+    clock = [0.0]
+    calls: list[str] = []
+    body = dumps(
+        {
+            "number": 1,
+            "state": "open",
+            "assignees": [{"login": "helperbot"}],
+        }
+    ).encode()
+
+    def request(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        middle = len(body) // 2
+        return httpx.Response(
+            200,
+            stream=_SlowByteStream(
+                [body[:middle], body[middle:]], clock, 6.0
+            ),
+        )
+
+    monkeypatch.setattr(app_module.time, "monotonic", lambda: clock[0])
+    hub.github = RealGitHub(hub.cfg, transport=httpx.MockTransport(request))
+    response = agent_hub.get("/api/assignments", params={"agent": "helperbot"})
+
+    assert response.status_code == 200
+    assert response.json()["assignments"][0]["enriched"] is False
+    assert calls == ["/repos/Acme/Widget/issues/1"]
+    assert clock[0] == 12.0
 
 
 def test_assignment_list_enriches_only_newest_50(agent_hub: TestClient) -> None:
@@ -2345,6 +2522,67 @@ def test_assignment_list_keeps_token_when_enrichment_is_forbidden(
     assert response.status_code == 200
     assert response.json()["assignments"][0]["enriched"] is False
     assert hub.github_tokens["alice"] == "tok-alice"
+    assert hub.store.get_oauth_token("alice") == "tok-alice"
+
+
+@pytest.mark.parametrize("status_code", [403, 404, 429, 500])
+def test_assignment_list_continues_after_one_http_enrichment_error(
+    agent_hub: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    assert agent_hub.post("/api/assignments", json=ASSIGNMENT).status_code == 201
+    hub = agent_hub.app.state.hub
+    hub.store.execute(
+        "INSERT INTO row_replica "
+        "(table_name, row_id, origin_device_id, github_login, payload, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            "activity",
+            "newer-assignment",
+            "web:alice",
+            "alice",
+            dumps(
+                {
+                    "id": "newer-assignment",
+                    "type": "assignment.created",
+                    "payload": {
+                        "agent": "helperbot",
+                        "actor": "alice",
+                        "repo": "Acme/Widget",
+                        "number": 1,
+                        "title": "Newer assignment",
+                    },
+                }
+            ),
+            "2099-01-01T00:00:00Z",
+        ),
+    )
+    enrich = app_module._assignment_enrichment
+    calls = 0
+
+    def fail_first(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise GitHubError(
+                f"GitHub request failed: HTTP {status_code}",
+                status_code=status_code,
+            )
+        return enrich(*args, **kwargs)
+
+    monkeypatch.setattr(app_module, "_assignment_enrichment", fail_first)
+    response = agent_hub.get("/api/assignments", params={"agent": "helperbot"})
+
+    assert response.status_code == 200
+    rows = response.json()["assignments"]
+    assert [row["title"] for row in rows] == [
+        "Newer assignment",
+        ASSIGNMENT["title"],
+    ]
+    assert [row["enriched"] for row in rows] == [False, True]
+    assert calls == 2
     assert hub.store.get_oauth_token("alice") == "tok-alice"
 
 
@@ -2672,30 +2910,30 @@ def test_real_github_comments_keeps_all_pages_when_last_page_is_short(
     ]
 
 
-def test_real_github_recovery_paginates_issues_back_to_reservation_time(
-    cfg, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_real_github_recovery_paginates_issues_back_to_reservation_time(cfg) -> None:
     calls: list[dict[str, object]] = []
 
-    def request(_method: str, _url: str, **kwargs: object) -> _Response:
-        params = kwargs["params"]
-        assert isinstance(params, dict)
+    def request(request: httpx.Request) -> httpx.Response:
+        params = dict(request.url.params)
+        params["per_page"] = int(params["per_page"])
+        if "page" in params:
+            params["page"] = int(params["page"])
         calls.append(params)
         if params.get("page") == 2:
-            return _Response(
+            return httpx.Response(
                 200,
-                [
+                json=[
                     {"number": 101, "created_at": "2026-11-05T09:59:59Z"},
                     {"number": 100, "created_at": "2026-11-05T09:59:58Z"},
                 ],
             )
-        return _Response(
+        return httpx.Response(
             200,
-            [
+            json=[
                 {"number": number, "created_at": "2026-11-05T10:00:00Z"}
                 for number in range(201, 101, -1)
             ],
-            {
+            headers={
                 "Link": (
                     '<https://api.github.com/repos/Acme/Widget/issues?per_page=100&page=2>; rel="next", '
                     '<https://api.github.com/repos/Acme/Widget/issues?per_page=100&page=2>; rel="last"'
@@ -2703,8 +2941,8 @@ def test_real_github_recovery_paginates_issues_back_to_reservation_time(
             },
         )
 
-    monkeypatch.setattr(httpx, "request", request)
-    rows = RealGitHub(cfg).recent_issues_by_creator(
+    github = RealGitHub(cfg, transport=httpx.MockTransport(request))
+    rows = github.recent_issues_by_creator(
         "tok-alice",
         "Acme/Widget",
         "alice",
@@ -2732,15 +2970,11 @@ def test_real_github_recovery_paginates_issues_back_to_reservation_time(
     ]
 
 
-def test_real_github_recovery_paginates_comments_backward_to_marker(
-    cfg, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_real_github_recovery_paginates_comments_backward_to_marker(cfg) -> None:
     calls: list[int] = []
 
-    def request(_method: str, _url: str, **kwargs: object) -> _Response:
-        params = kwargs["params"]
-        assert isinstance(params, dict)
-        page = int(params.get("page", 1))
+    def request(request: httpx.Request) -> httpx.Response:
+        page = int(request.url.params.get("page", "1"))
         calls.append(page)
         start = (page - 1) * 100 + 1
         rows = [
@@ -2759,10 +2993,10 @@ def test_real_github_recovery_paginates_comments_backward_to_marker(
                     '<https://api.github.com/repos/Acme/Widget/issues/1/comments?per_page=100&page=3>; rel="last"'
                 )
             }
-        return _Response(200, rows, headers)
+        return httpx.Response(200, json=rows, headers=headers)
 
-    monkeypatch.setattr(httpx, "request", request)
-    rows = RealGitHub(cfg).issue_comments(
+    github = RealGitHub(cfg, transport=httpx.MockTransport(request))
+    rows = github.issue_comments(
         "tok-alice",
         "Acme/Widget",
         1,
@@ -2785,6 +3019,30 @@ def test_real_github_does_not_start_read_with_no_time_left(
 
     with pytest.raises(GitHubError, match="time budget exhausted"):
         RealGitHub(cfg).issue("tok-alice", "Acme/Widget", 1, 0.0)
+
+
+def test_real_github_does_not_follow_redirect_after_deadline(
+    cfg, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = [0.0]
+    calls: list[str] = []
+
+    def request(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        clock[0] = 10.0
+        return httpx.Response(
+            301,
+            headers={"Location": "/repositories/42/issues/1"},
+        )
+
+    monkeypatch.setattr(app_module.time, "monotonic", lambda: clock[0])
+    github = RealGitHub(cfg, transport=httpx.MockTransport(request))
+
+    with pytest.raises(GitHubError, match="time budget exhausted") as raised:
+        github.issue("tok-alice", "Acme/Widget", 1, 10.0)
+
+    assert raised.value.status_code is None
+    assert calls == ["/repos/Acme/Widget/issues/1"]
 
 
 def test_assignment_github_calls_use_to_thread(

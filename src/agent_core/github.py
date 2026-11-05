@@ -139,8 +139,14 @@ def _pr_from_search_item(item: dict[str, Any]) -> dict[str, Any] | None:
 
 
 class RealGitHub(GitHub):
-    def __init__(self, cfg: Config) -> None:
+    def __init__(
+        self,
+        cfg: Config,
+        *,
+        transport: httpx.BaseTransport | None = None,
+    ) -> None:
         self._cfg = cfg
+        self._transport = transport
 
     def authorize_url(self, state: str, redirect_uri: str) -> str:
         query = urlencode(
@@ -278,21 +284,32 @@ class RealGitHub(GitHub):
         if request_timeout <= 0:
             raise GitHubError("GitHub request skipped: time budget exhausted")
         try:
-            resp = httpx.request(
-                method,
-                f"{GITHUB_API_URL}{path}",
-                json=json_body,
-                params=params,
-                headers={
+            request_kwargs = {
+                "json": json_body,
+                "params": params,
+                "headers": {
                     "Authorization": f"Bearer {token}",
                     "Accept": "application/vnd.github+json",
                     "X-GitHub-Api-Version": "2022-11-28",
                 },
-                timeout=request_timeout,
-                # GitHub answers a renamed or transferred repository with 301 (GET) or
-                # 307 (writes); httpx drops Authorization if a redirect leaves the host.
-                follow_redirects=True,
-            )
+            }
+            if timeout is None:
+                resp = httpx.request(
+                    method,
+                    f"{GITHUB_API_URL}{path}",
+                    **request_kwargs,
+                    timeout=request_timeout,
+                    # GitHub answers a renamed or transferred repository with 301 (GET) or
+                    # 307 (writes); httpx drops Authorization if a redirect leaves the host.
+                    follow_redirects=True,
+                )
+            else:
+                resp = self._request_with_deadline(
+                    method,
+                    f"{GITHUB_API_URL}{path}",
+                    request_kwargs,
+                    time.monotonic() + request_timeout,
+                )
         except httpx.HTTPError as exc:
             raise GitHubError(f"GitHub request failed: {type(exc).__name__}") from exc
         if resp.status_code not in expected:
@@ -317,6 +334,57 @@ class RealGitHub(GitHub):
         raw_headers = getattr(resp, "headers", {})
         headers = {str(key).lower(): str(value) for key, value in raw_headers.items()}
         return result, headers
+
+    def _request_with_deadline(
+        self,
+        method: str,
+        url: str,
+        request_kwargs: dict[str, Any],
+        deadline: float,
+    ) -> httpx.Response:
+        with httpx.Client(transport=self._transport) as client:
+            request = client.build_request(
+                method,
+                url,
+                **request_kwargs,
+                timeout=_deadline_timeout(deadline),
+            )
+            redirects = 0
+            while True:
+                request.extensions["timeout"] = _timeout_extensions(
+                    _deadline_timeout(deadline)
+                )
+                response = client.send(
+                    request,
+                    stream=True,
+                    follow_redirects=False,
+                )
+                try:
+                    _check_deadline(deadline)
+                    next_request = response.next_request
+                    if next_request is not None:
+                        redirects += 1
+                        if redirects > client.max_redirects:
+                            raise httpx.TooManyRedirects(
+                                "Exceeded maximum allowed redirects",
+                                request=request,
+                            )
+                        request = next_request
+                        _check_deadline(deadline)
+                        continue
+                    chunks: list[bytes] = []
+                    for chunk in response.iter_bytes():
+                        _check_deadline(deadline)
+                        chunks.append(chunk)
+                    _check_deadline(deadline)
+                    return httpx.Response(
+                        response.status_code,
+                        headers=response.headers,
+                        content=b"".join(chunks),
+                        request=response.request,
+                    )
+                finally:
+                    response.close()
 
     def create_issue(
         self, token: str, repo: str, title: str, body: str, assignees: list[str]
@@ -511,6 +579,27 @@ def _remaining_timeout(deadline: float | None) -> float | None:
     if deadline is None:
         return None
     return max(0.0, deadline - time.monotonic())
+
+
+def _check_deadline(deadline: float) -> None:
+    if time.monotonic() >= deadline:
+        raise GitHubError("GitHub request skipped: time budget exhausted")
+
+
+def _deadline_timeout(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise GitHubError("GitHub request skipped: time budget exhausted")
+    return min(GITHUB_REQUEST_TIMEOUT, remaining)
+
+
+def _timeout_extensions(timeout: float) -> dict[str, float]:
+    return {
+        "connect": timeout,
+        "read": timeout,
+        "write": timeout,
+        "pool": timeout,
+    }
 
 
 def _page_reaches_time(rows: list[dict[str, Any]], since: str) -> bool:

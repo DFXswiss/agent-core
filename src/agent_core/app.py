@@ -909,8 +909,6 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                         enrich = False
                     elif exc.status_code is None:
                         enrich = False
-                    else:
-                        raise
             assignments.append(item)
         _prune_issue_cache(hub)
         return {"agent": wanted, "assignments": assignments}
@@ -1073,11 +1071,11 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                     request_owner,
                 )
                 request.state.request_id_prior_write = True
-        except HTTPException as exc:
+        except HTTPException:
             if request_id is not None:
                 if (
-                    exc.detail == GITHUB_TOKEN_REQUIRED_DETAIL
-                    and getattr(request.state, "request_id_prior_write", False)
+                    getattr(request.state, "request_id_prior_write", False)
+                    or comment_write_started
                 ):
                     hub.store.expire_request(
                         actor, "assignment.reply", request_id, request_owner
