@@ -1238,7 +1238,9 @@ def _prune_issue_cache(hub: Hub) -> None:
             hub.issue_cache.pop(key, None)
     overflow = len(hub.issue_cache) - ISSUE_CACHE_MAX_ENTRIES
     if overflow > 0:
-        oldest = sorted(hub.issue_cache, key=lambda key: hub.issue_cache[key][0])[:overflow]
+        # Sort a snapshot: the enrichment threadpool may insert while this runs.
+        snapshot = list(hub.issue_cache.items())
+        oldest = [key for key, _entry in sorted(snapshot, key=lambda item: item[1][0])[:overflow]]
         for key in oldest:
             hub.issue_cache.pop(key, None)
 

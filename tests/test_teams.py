@@ -8,6 +8,86 @@ import yaml
 from agent_core.teams import TeamsError, load_roster, load_teams, visible_logins
 
 
+@pytest.mark.parametrize(
+    ("document", "message"),
+    [
+        ("teams: [", "not valid YAML"),
+        ([], "top-level 'teams' map"),
+        ({"other": 1}, "top-level 'teams' map"),
+        ({"teams": []}, "'teams' must be a map"),
+        ({"teams": {"": {"members": []}}}, "team name must be a non-empty string"),
+        ({"teams": {"dfx": []}}, "must have a 'members' list"),
+        ({"teams": {"dfx": {}}}, "must have a 'members' list"),
+        ({"teams": {"dfx": {"members": "alice"}}}, "members must be a list"),
+        ({"teams": {"dfx": {"members": [None]}}}, "non-string or empty member"),
+        ({"teams": {"dfx": {"members": ["alice", "ALICE"]}}}, "lists alice twice"),
+        ({"teams": {}, "agents": []}, "'agents' must be a map"),
+        (
+            {"teams": {"dfx": {"members": ["owner"]}}, "agents": {"": {"owners": []}}},
+            "agent login must be a non-empty string",
+        ),
+        (
+            {
+                "teams": {"dfx": {"members": ["bot"]}},
+                "agents": {"Bot": {"owners": []}, "bot": {"owners": []}},
+            },
+            "agents map lists bot twice",
+        ),
+        (
+            {"teams": {"dfx": {"members": ["owner"]}}, "agents": {"bot": {"owners": ["owner"]}}},
+            "must be a member",
+        ),
+        (
+            {"teams": {"dfx": {"members": ["bot"]}}, "agents": {"bot": []}},
+            "must have an 'owners' list",
+        ),
+        (
+            {"teams": {"dfx": {"members": ["bot"]}}, "agents": {"bot": {}}},
+            "must have an 'owners' list",
+        ),
+        (
+            {"teams": {"dfx": {"members": ["bot"]}}, "agents": {"bot": {"owners": "owner"}}},
+            "owners must be a list",
+        ),
+        (
+            {"teams": {"dfx": {"members": ["bot"]}}, "agents": {"bot": {"owners": [None]}}},
+            "non-string or empty owner",
+        ),
+        (
+            {
+                "teams": {"dfx": {"members": ["bot", "owner"]}},
+                "agents": {"bot": {"owners": ["owner", "OWNER"]}},
+            },
+            "lists owner owner twice",
+        ),
+        (
+            {"teams": {"dfx": {"members": ["bot"]}}, "agents": {"bot": {"owners": ["bot"]}}},
+            "cannot own itself",
+        ),
+        (
+            {
+                "teams": {"one": {"members": ["bot"]}, "two": {"members": ["owner"]}},
+                "agents": {"bot": {"owners": ["owner"]}},
+            },
+            "must share a team",
+        ),
+    ],
+)
+def test_roster_error_branches_are_fail_closed(
+    tmp_path: Path, document: object, message: str
+) -> None:
+    path = tmp_path / "invalid-teams.yaml"
+    raw = document if isinstance(document, str) else yaml.safe_dump(document)
+    path.write_text(raw, encoding="utf-8")
+    with pytest.raises(TeamsError, match=message):
+        load_roster(path)
+
+
+def test_visible_logins_rejects_an_empty_login() -> None:
+    with pytest.raises(TeamsError, match="login must be a non-empty string"):
+        visible_logins(" ", {})
+
+
 def test_load_and_visibility(tmp_path: Path) -> None:
     path = tmp_path / "teams.yaml"
     path.write_text(

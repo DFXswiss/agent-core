@@ -21,6 +21,10 @@ def test_dashboard_html_has_usage_table(hub: TestClient) -> None:
     assert 'row.type !== "usage.snapshot"' in body
     assert "seen.has(key)" in body
     assert 'row._github_login || ""' in body
+    assert 'function sessionLink(value)' in body
+    assert 'const sessionId = typeof value === "string" ? value : ""' in body
+    assert 'sessionLink(row.session_id)' in body
+    assert 'href="/sessions/${encodeURIComponent(row.session_id || "")}"' not in body
 
 
 def test_api_state_usage_snapshots_newest_first(hub: TestClient) -> None:

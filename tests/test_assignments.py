@@ -12,6 +12,7 @@ from agent_core.db import dumps
 from agent_core.github import FakeGitHub, GitHubError, RealGitHub
 from tests.conftest import pair_device, sign_in
 from tests.test_agent_pair_control import _pair_as
+from tests.test_newest_first import _insert_replica
 
 
 ASSIGNMENT = {
@@ -134,6 +135,145 @@ def test_assignment_authorization_and_missing_token(agent_hub: TestClient) -> No
     )
     assert missing.status_code == 409
     assert "sign in on the website once" in missing.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    ("method", "url", "payload"),
+    [
+        ("POST", "/api/assignments", ASSIGNMENT),
+        ("GET", "/api/assignments?agent=helperbot", None),
+        (
+            "POST",
+            "/api/assignments/Acme/Widget/1/comments",
+            {"body": "A reply."},
+        ),
+    ],
+)
+def test_assignment_routes_require_a_session(
+    agent_hub: TestClient, method: str, url: str, payload: dict[str, str] | None
+) -> None:
+    response = agent_hub.request(method, url, json=payload)
+    assert response.status_code == 401
+    assert response.json() == {"detail": "not signed in"}
+
+
+@pytest.mark.parametrize(
+    ("changes", "detail"),
+    [
+        ({"repo": "not-a-repository"}, "repo must be Owner/Name"),
+        ({"title": ""}, "title must be a string of length 1..256"),
+        ({"title": "x" * 257}, "title must be a string of length 1..256"),
+        ({"body": ""}, "body must be a string of length 1..60000"),
+        ({"body": "x" * 60001}, "body must be a string of length 1..60000"),
+    ],
+)
+def test_assignment_create_validation_errors(
+    agent_hub: TestClient, changes: dict[str, str], detail: str
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    response = agent_hub.post("/api/assignments", json=dict(ASSIGNMENT, **changes))
+    assert response.status_code == 400
+    assert response.json() == {"detail": detail}
+
+
+@pytest.mark.parametrize("body", ["", "x" * 60001])
+def test_assignment_reply_body_length_errors(
+    agent_hub: TestClient, body: str
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    response = agent_hub.post(
+        "/api/assignments/Acme/Widget/1/comments", json={"body": body}
+    )
+    assert response.status_code == 400
+    assert response.json() == {"detail": "body must be a string of length 1..60000"}
+
+
+@pytest.mark.parametrize(
+    ("method", "url", "payload"),
+    [
+        ("POST", "/api/assignments", dict(ASSIGNMENT, agent="unknownbot")),
+        ("GET", "/api/assignments?agent=unknownbot", None),
+        (
+            "POST",
+            "/api/assignments/Acme/Widget/0/comments",
+            {"body": "A reply."},
+        ),
+    ],
+)
+def test_assignment_unknown_agent_and_issue_errors(
+    agent_hub: TestClient, method: str, url: str, payload: dict[str, str] | None
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    response = agent_hub.request(method, url, json=payload)
+    assert response.status_code == 404
+    assert response.json()["detail"] in {"unknown agent", "unknown issue"}
+
+
+@pytest.mark.parametrize("operation", ["create", "reply"])
+def test_assignment_write_requires_agent_ownership(
+    agent_hub: TestClient, operation: str
+) -> None:
+    if operation == "reply":
+        sign_in(agent_hub, "code-alice")
+        assert agent_hub.post("/api/assignments", json=ASSIGNMENT).status_code == 201
+    sign_in(agent_hub, "code-bob")
+    response = (
+        agent_hub.post("/api/assignments", json=ASSIGNMENT)
+        if operation == "create"
+        else agent_hub.post(
+            "/api/assignments/Acme/Widget/1/comments", json={"body": "No access."}
+        )
+    )
+    assert response.status_code == 403
+
+
+@pytest.mark.parametrize("operation", ["create", "reply"])
+def test_assignment_write_requires_a_stored_github_token(
+    agent_hub: TestClient, operation: str
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    if operation == "reply":
+        assert agent_hub.post("/api/assignments", json=ASSIGNMENT).status_code == 201
+    hub = agent_hub.app.state.hub
+    hub.github_tokens.pop("alice", None)
+    hub.store.delete_oauth_token("alice")
+    response = (
+        agent_hub.post("/api/assignments", json=ASSIGNMENT)
+        if operation == "create"
+        else agent_hub.post(
+            "/api/assignments/Acme/Widget/1/comments", json={"body": "A reply."}
+        )
+    )
+    assert response.status_code == 409
+    assert "sign in on the website" in response.json()["detail"]
+
+
+@pytest.mark.parametrize("operation", ["create", "reply"])
+def test_assignment_github_failures_are_502(
+    agent_hub: TestClient, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    hub = agent_hub.app.state.hub
+    if operation == "reply":
+        assert agent_hub.post("/api/assignments", json=ASSIGNMENT).status_code == 201
+
+    def reject(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise GitHubError("GitHub request failed: HTTP 403", status_code=403)
+
+    monkeypatch.setattr(
+        hub.github,
+        "create_issue" if operation == "create" else "issue",
+        reject,
+    )
+    response = (
+        agent_hub.post("/api/assignments", json=ASSIGNMENT)
+        if operation == "create"
+        else agent_hub.post(
+            "/api/assignments/Acme/Widget/1/comments", json={"body": "A reply."}
+        )
+    )
+    assert response.status_code == 502
+    assert "HTTP 403" in response.json()["detail"]
 
 
 @pytest.mark.parametrize(
@@ -328,7 +468,10 @@ def test_assignment_list_comments_and_reply_authorization(agent_hub: TestClient)
     assert denied.status_code == 403
 
 
-def test_device_cannot_push_hub_authored_assignment_activity(agent_hub: TestClient) -> None:
+@pytest.mark.parametrize("activity_type", ["assignment.created", "assignment.reply"])
+def test_device_cannot_push_hub_authored_assignment_activity(
+    agent_hub: TestClient, activity_type: str
+) -> None:
     device_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaac04"
     token = pair_device(agent_hub, "code-alice", device_id)
     pushed = agent_hub.post(
@@ -344,7 +487,7 @@ def test_device_cannot_push_hub_authored_assignment_activity(agent_hub: TestClie
                     "row_id": "forged-assignment",
                     "payload": {
                         "id": "forged-assignment",
-                        "type": "assignment.created",
+                        "type": activity_type,
                         "payload": {
                             "agent": "helperbot",
                             "actor": "alice",
@@ -558,12 +701,56 @@ def test_fake_github_mutations_resolve_mixed_case_repo_to_canonical_name() -> No
     comment = github.create_issue_comment(
         "tok-alice", "ACME/WIDGET", created["number"], "Reply"
     )
+    comments = github.issue_comments(
+        "tok-alice", "ACME/WIDGET", created["number"]
+    )
 
     assert fetched["html_url"] == "https://github.test/Acme/Widget/issues/1"
     assert assigned["assignees"] == [{"login": "helperbot"}]
     assert comment["html_url"] == (
         "https://github.test/Acme/Widget/issues/1#issuecomment-1"
     )
+    assert [item["body"] for item in comments] == ["Reply"]
+
+    with pytest.raises(GitHubError) as raised:
+        github.issue_comments("tok-alice", "ACME/WIDGET", 999)
+    assert raised.value.status_code == 404
+
+
+def test_reply_targets_every_assigned_agent_timeline(
+    two_agent_hub: TestClient,
+) -> None:
+    sign_in(two_agent_hub, "code-alice")
+    created = two_agent_hub.post("/api/assignments", json=ASSIGNMENT)
+    assert created.status_code == 201
+    github: FakeGitHub = two_agent_hub.app.state.hub.github
+    github.issues[("Acme/Widget", 1)]["assignees"] = [
+        {"login": "secondbot"},
+        {"login": "helperbot"},
+    ]
+
+    response = two_agent_hub.post(
+        "/api/assignments/Acme/Widget/1/comments",
+        json={"body": "Reply to both agents."},
+    )
+    assert response.status_code == 201
+    state = two_agent_hub.get("/api/state").json()
+    reply = next(row for row in state["activity"] if row.get("type") == "assignment.reply")
+    assert reply["payload"]["agent"] == "helperbot"
+    assert reply["payload"]["agents"] == ["helperbot", "secondbot"]
+
+    _insert_replica(
+        two_agent_hub,
+        table="session",
+        row_id="second-agent-session",
+        updated_at="2026-11-05T12:00:00Z",
+        login="secondbot",
+        payload={"id": "second-agent-session", "created_at": "2026-11-05T12:00:00Z"},
+    )
+    timeline = two_agent_hub.get(
+        "/api/sessions/second-agent-session/timeline"
+    ).json()["timeline"]
+    assert reply["id"] in [row["row_id"] for row in timeline]
 
 
 def test_real_github_comments_follows_last_page_for_newest_comments(
@@ -662,6 +849,23 @@ def test_assignment_form_links_created_issue_and_locks_resubmission() -> None:
     )
     assert "submit.disabled = true" in html
     assert 'form.addEventListener("input", unlock)' in html
+
+
+def test_assignment_loads_have_a_deadline_and_keep_forms_visible() -> None:
+    html = (
+        Path(__file__).resolve().parents[1] / "src" / "agent_core" / "static" / "index.html"
+    ).read_text(encoding="utf-8")
+    assert "const ASSIGNMENT_LOAD_TIMEOUT_MS = 20000" in html
+    assert "controller.abort();" in html
+    assert "clearTimeout(timeout);" in html
+    assert "if (result.error)" in html
+    assert "renderAgentCards(owned" in html
+    assert "Loading assignments…" in html
+    assert "partialAssignmentLocks.clear();" in html
+    assert "assignmentLoads.delete(agent);" in html
+    assert "assignmentResults.delete(agent);" in html
+    assert "function clearError()" in html
+    assert html.count("clearError();") >= 3
 
 
 def test_assignment_and_timeline_links_use_safe_href() -> None:

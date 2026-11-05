@@ -9,6 +9,19 @@ from tests.conftest import sign_in
 from tests.test_newest_first import _insert_replica
 
 
+def test_usage_timeline_and_session_page_require_a_session(
+    agent_hub: TestClient,
+) -> None:
+    for path in (
+        "/api/usage",
+        "/api/sessions/missing/timeline",
+        "/sessions/missing",
+    ):
+        response = agent_hub.get(path)
+        assert response.status_code == 401
+        assert response.json() == {"detail": "not signed in"}
+
+
 def test_usage_aggregates_lanes_openrouter_and_keeps_grok_shape(agent_hub: TestClient) -> None:
     sign_in(agent_hub, "code-alice")
     _insert_replica(
@@ -357,7 +370,79 @@ def test_session_page_reads_real_lane_tool_payload_with_legacy_fallback() -> Non
         Path(__file__).resolve().parents[1] / "src" / "agent_core" / "static" / "session.html"
     ).read_text(encoding="utf-8")
 
-    assert "Array.isArray(inner.tools)" in html
-    assert "Array.isArray(inner.tool_calls)" in html
-    assert "inner.tools_truncated" in html
+    assert "function toolCallRows(inner)" in html
+    assert "const calls = Array.isArray(inner.tools)" in html
+    assert ": (Array.isArray(inner.tool_calls) ? inner.tool_calls : [])" in html
+    assert "tool: call.tool || call.name || \"tool\"" in html
+    assert "target: call.target || call.path || call.command || \"\"" in html
+    assert 'error: call.error || (call.status === "error" ? "error" : "")' in html
+    assert "truncated: !!inner.tools_truncated" in html
     assert "Tool list truncated." in html
+
+
+def test_timeline_preserves_the_tool_renderer_contract(agent_hub: TestClient) -> None:
+    sign_in(agent_hub, "code-alice")
+    _insert_replica(
+        agent_hub,
+        table="session",
+        row_id="tool-contract-session",
+        updated_at="2026-11-05T09:00:00Z",
+        login="helperbot",
+        payload={"id": "tool-contract-session", "created_at": "2026-11-05T09:00:00Z"},
+    )
+    _insert_replica(
+        agent_hub,
+        table="activity",
+        row_id="tool-contract-primary",
+        updated_at="2026-11-05T09:01:00Z",
+        login="helperbot",
+        payload={
+            "id": "tool-contract-primary",
+            "type": "lane.run",
+            "session_id": "tool-contract-session",
+            "payload": {
+                "tools": [{"tool": "Read", "target": "README.md", "error": "denied"}],
+                "tool_calls": [{"name": "Legacy", "path": "ignored"}],
+            },
+        },
+    )
+    _insert_replica(
+        agent_hub,
+        table="activity",
+        row_id="tool-contract-truncated",
+        updated_at="2026-11-05T09:02:00Z",
+        login="helperbot",
+        payload={
+            "id": "tool-contract-truncated",
+            "type": "lane.run",
+            "session_id": "tool-contract-session",
+            "payload": {
+                "tools": [],
+                "tool_calls": [{"name": "Legacy", "path": "ignored"}],
+                "tools_truncated": True,
+            },
+        },
+    )
+
+    response = agent_hub.get("/api/sessions/tool-contract-session/timeline")
+    assert response.status_code == 200
+    rows = {row["row_id"]: row["payload"]["payload"] for row in response.json()["timeline"] if row["table"] == "activity"}
+    assert rows["tool-contract-primary"] == {
+        "tools": [{"tool": "Read", "target": "README.md", "error": "denied"}],
+        "tool_calls": [{"name": "Legacy", "path": "ignored"}],
+    }
+    assert rows["tool-contract-truncated"]["tools"] == []
+    assert rows["tool-contract-truncated"]["tools_truncated"] is True
+
+
+def test_session_page_handles_ids_and_signed_out_timeline_fetches() -> None:
+    html = (
+        Path(__file__).resolve().parents[1] / "src" / "agent_core" / "static" / "session.html"
+    ).read_text(encoding="utf-8")
+    assert "decodeURIComponent" not in html
+    assert "const sessionId = parts[parts.length - 1] || \"\"" in html
+    assert "encodeURIComponent(sessionId)" in html
+    assert "try {" in html[html.index("async function load()") :]
+    assert "if (response.status === 401)" in html
+    assert 'link.href = "/"' in html
+    assert 'notice.replaceChildren("Signed out — ", link)' in html

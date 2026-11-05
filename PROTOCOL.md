@@ -266,7 +266,7 @@ Cookie session after GitHub OAuth.
 - `GET /api/sessions/{id}` — one visible session plus control flags.
 - `POST /api/sessions/{id}/control` — start / stop / input / resize (device login or configured agent owner only).
 - `GET /api/sessions/{id}/terminal` — JSON ring snapshot or SSE terminal stream.
-- `GET /api/sessions/{id}/timeline` — the newest 5,000 related replica rows, returned oldest first, with `truncated: true` when capped.
+- `GET /api/sessions/{id}/timeline` — the newest 5,000 related replica rows, returned oldest first, with `truncated: true` when capped. A missing website cookie returns 401; the session page renders this as **Signed out — sign in on the dashboard** with a link to `/`.
 - `POST /api/assignments` — create and verify an agent-assigned GitHub issue using the owner's OAuth token.
 - `GET /api/assignments?agent=<login>` — newest-first assignment activity, enriched best-effort with issue state, assignees, and the newest 20 comments.
 - `POST /api/assignments/{owner}/{name}/{number}/comments` — reply using an owner OAuth token after a fresh assignee check.

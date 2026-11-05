@@ -33,24 +33,30 @@
         return null;
       }
     }
-    const parts = location.pathname.split("/").filter(Boolean);
-    const sessionId = decodeURIComponent(parts[parts.length - 1] || "");
-    document.getElementById("session-id").textContent = sessionId;
-
-    function toolCalls(inner) {
+    function toolCallRows(inner) {
       const calls = Array.isArray(inner.tools)
         ? inner.tools
         : (Array.isArray(inner.tool_calls) ? inner.tool_calls : []);
-      const truncated = inner.tools_truncated
+      return {
+        calls: calls.map(call => ({
+          tool: call.tool || call.name || "tool",
+          target: call.target || call.path || call.command || "",
+          error: call.error || (call.status === "error" ? "error" : ""),
+        })),
+        truncated: !!inner.tools_truncated,
+      };
+    }
+
+    function toolCalls(inner) {
+      const rows = toolCallRows(inner);
+      const truncated = rows.truncated
         ? '<p class="muted">Tool list truncated.</p>'
         : "";
-      if (!calls.length) return truncated;
-      return "<ul>" + calls.map(call => {
-        const tool = call.tool || call.name || "tool";
-        const target = call.target || call.path || call.command || "";
-        const rawError = call.error || (call.status === "error" ? "error" : "");
+      if (!rows.calls.length) return truncated;
+      return "<ul>" + rows.calls.map(call => {
+        const rawError = call.error;
         const error = rawError === true ? "error" : rawError;
-        return `<li class="${error ? "error" : ""}">${esc(tool)} ${esc(target)}${error ? " — " + esc(error) : ""}</li>`;
+        return `<li class="${error ? "error" : ""}">${esc(call.tool)} ${esc(call.target)}${error ? " — " + esc(error) : ""}</li>`;
       }).join("") + "</ul>" + truncated;
     }
 
@@ -80,19 +86,50 @@
       return `<code>${esc(JSON.stringify(payload))}</code>`;
     }
 
-    async function load() {
-      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/timeline`);
-      if (!response.ok) throw new Error(response.status === 404 ? "Session not found." : "HTTP " + response.status);
-      const data = await response.json();
-      const rows = data.timeline || [];
-      document.querySelector("#timeline tbody").innerHTML = rows.map(row => `<tr>
-        <td>${esc(row.at)}</td><td>${esc(row.table)}</td><td>${describe(row)}</td>
-      </tr>`).join("") || "<tr><td colspan='3'>No timeline rows.</td></tr>";
-      document.getElementById("notice").textContent = data.truncated
-        ? "Showing the newest 5,000 rows (oldest first)"
-        : `${rows.length} rows, oldest first.`;
+    function showSignedOut() {
+      const notice = document.getElementById("notice");
+      notice.classList.add("error");
+      const link = document.createElement("a");
+      link.href = "/";
+      link.textContent = "sign in on the dashboard";
+      notice.replaceChildren("Signed out — ", link);
     }
-    load().catch(error => { document.getElementById("notice").textContent = String(error); });
+
+    async function load() {
+      const notice = document.getElementById("notice");
+      try {
+        const parts = location.pathname.split("/").filter(Boolean);
+        // location.pathname is percent-encoded: decode the segment exactly once here,
+        // inside the try, so a malformed escape shows the error instead of a stuck page.
+        let sessionId = "";
+        try {
+          sessionId = decodeURIComponent(parts[parts.length - 1] || "");
+        } catch (_err) {
+          throw new Error("Invalid session id.");
+        }
+        if (!sessionId) throw new Error("Invalid session id.");
+        document.getElementById("session-id").textContent = sessionId;
+        const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/timeline`);
+        if (response.status === 401) {
+          showSignedOut();
+          return;
+        }
+        if (!response.ok) throw new Error(response.status === 404 ? "Session not found." : "HTTP " + response.status);
+        const data = await response.json();
+        const rows = data.timeline || [];
+        document.querySelector("#timeline tbody").innerHTML = rows.map(row => `<tr>
+          <td>${esc(row.at)}</td><td>${esc(row.table)}</td><td>${describe(row)}</td>
+        </tr>`).join("") || "<tr><td colspan='3'>No timeline rows.</td></tr>";
+        notice.classList.remove("error");
+        notice.textContent = data.truncated
+          ? "Showing the newest 5,000 rows (oldest first)"
+          : `${rows.length} rows, oldest first.`;
+      } catch (error) {
+        notice.classList.add("error");
+        notice.textContent = String(error);
+      }
+    }
+    load();
   </script>
 </body>
 </html>

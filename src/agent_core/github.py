@@ -497,7 +497,10 @@ class FakeGitHub(GitHub):
         self.issue_calls.append(
             {"operation": "issue_comments", "token": token, "repo": repo, "number": number}
         )
-        comments = self.comments.get((repo, number), [])
+        canonical_repo = self.canonical_repos.get(repo.lower(), repo)
+        if (canonical_repo, number) not in self.issues:
+            raise GitHubError("GitHub request failed: HTTP 404: Not Found", status_code=404)
+        comments = self.comments.get((canonical_repo, number), [])
         if not comments:
             return []
         last_page_start = ((len(comments) - 1) // 100) * 100

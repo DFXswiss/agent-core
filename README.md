@@ -69,6 +69,7 @@ Anyone who can see a session may watch its live terminal on the website. Start, 
 The dashboard shows an **Agents** section to people who own at least one configured agent. It links agent sessions to their chronological timelines, shows current coordinator state, creates assignments, displays issue questions, and posts owner replies. Assignment creation responses and stored activity use GitHub's canonical repository case. Usage is available in lane-token, OpenRouter-account, and Grok tables.
 
 Session timelines keep the newest 5,000 related rows when capped and return those rows in chronological order (oldest first) with `truncated: true`.
+If the dashboard session expires while a timeline page is open, the page shows **Signed out — sign in on the dashboard** and links back to `/`.
 
 Website API endpoints are documented in [PROTOCOL.md](PROTOCOL.md):
 

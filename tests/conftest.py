@@ -92,6 +92,40 @@ def agent_hub(cfg: Config, tmp_path: Path) -> TestClient:
         store.close()
 
 
+@pytest.fixture
+def two_agent_hub(cfg: Config, tmp_path: Path) -> TestClient:
+    roster_path = tmp_path / "two-agent-teams.yaml"
+    roster_path.write_text(
+        yaml.safe_dump(
+            {
+                "teams": {
+                    "dfx": {
+                        "members": ["alice", "helperbot", "secondbot"],
+                    }
+                },
+                "agents": {
+                    "helperbot": {"owners": ["alice"]},
+                    "secondbot": {"owners": ["alice"]},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    agent_cfg = replace(
+        cfg,
+        teams_path=roster_path,
+        database=str(tmp_path / "two-agent-hub.sqlite"),
+    )
+    github = FakeGitHub({"code-alice": "alice"})
+    store = Store(agent_cfg.database)
+    try:
+        app = create_app(agent_cfg, github=github, store=store)
+        with TestClient(app) as client:
+            yield client
+    finally:
+        store.close()
+
+
 def sign_in(client: TestClient, code: str) -> None:
     start = client.get("/auth/github", follow_redirects=False)
     assert start.status_code == 302

@@ -288,6 +288,7 @@
     let latestAgentState = {};
     let assignmentOwnersKey = "";
     const ASSIGNMENT_REFRESH_MS = 15000;
+    const ASSIGNMENT_LOAD_TIMEOUT_MS = 20000;
     const assignmentLoads = new Map();
     const assignmentResults = new Map();
     const assignmentCompletedAt = new Map();
@@ -318,7 +319,14 @@
       assignmentResults.clear();
       assignmentCompletedAt.clear();
       assignmentInvalidations.clear();
+      partialAssignmentLocks.clear();
       ++agentRenderGen;
+    }
+
+    function clearError() {
+      const err = document.getElementById("err");
+      err.hidden = true;
+      err.textContent = "";
     }
 
     function expireAssignmentLoad(agent) {
@@ -413,6 +421,13 @@
       }).join("") + "</tr>").join("") || "<tr><td colspan='" + cols.length + "'>—</td></tr>";
     }
 
+    function sessionLink(value) {
+      const sessionId = typeof value === "string" ? value : "";
+      return sessionId
+        ? `<a href="/sessions/${encodeURIComponent(sessionId)}">${esc(sessionId)}</a>`
+        : esc(sessionId);
+    }
+
     function fillSessions(sessions) {
       const tb = document.querySelector("#sessions tbody");
       const rows = sessions || [];
@@ -421,7 +436,7 @@
         const status = s.status ?? "";
         return `<tr class="session-row" data-session-id="${esc(s.id)}">
           <td>${esc(s._github_login)}</td>
-          <td><a href="/sessions/${encodeURIComponent(s.id)}">${esc(s.id)}</a></td>
+          <td>${sessionLink(s.id)}</td>
           <td>${esc(s.kind)}</td>
           <td class="${esc(status)}">${esc(status)}</td>
           <td>${esc(s.host)}</td>
@@ -470,12 +485,14 @@
 
     function fillLaneUsage(rows) {
       const tb = document.querySelector("#lane-usage tbody");
-      tb.innerHTML = (rows || []).map(row => `<tr>
-        <td>${esc(row.login)}</td><td><a href="/sessions/${encodeURIComponent(row.session_id || "")}">${esc(row.session_id)}</a></td>
+      tb.innerHTML = (rows || []).map(row => {
+        return `<tr>
+        <td>${esc(row.login)}</td><td>${sessionLink(row.session_id)}</td>
         <td>${esc(row.provider)}</td><td>${esc(row.model)}</td><td>${esc(row.runs)}</td>
         <td>${esc(row.input_tokens)}</td><td>${esc(row.output_tokens)}</td>
         <td>${esc(row.cache_read_input_tokens)}</td><td>${esc(row.cache_creation_input_tokens)}</td><td>${esc(row.last_at)}</td>
-      </tr>`).join("") || "<tr><td colspan='10'>—</td></tr>";
+      </tr>`;
+      }).join("") || "<tr><td colspan='10'>—</td></tr>";
     }
 
     function usd(value) {
@@ -606,6 +623,11 @@
       }
       const controller = new AbortController();
       const invalidation = assignmentInvalidations.get(agent) || 0;
+      let timedOut = false;
+      const timeout = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, ASSIGNMENT_LOAD_TIMEOUT_MS);
       const promise = (async () => {
         try {
           const res = await fetch("/api/assignments?agent=" + encodeURIComponent(agent), { signal: controller.signal });
@@ -622,7 +644,12 @@
           }
           return { assignments: body.assignments, error: null };
         } catch (e) {
-          return { assignments: [], error: e.name === "AbortError" ? "request aborted" : String(e) };
+          return {
+            assignments: [],
+            error: timedOut ? "Timed out loading assignments." : (e.name === "AbortError" ? "request aborted" : String(e)),
+          };
+        } finally {
+          clearTimeout(timeout);
         }
       })();
       assignmentLoads.set(agent, { controller, promise });
@@ -631,30 +658,29 @@
         if (!active || active.promise !== promise) return;
         assignmentLoads.delete(agent);
         if ((assignmentInvalidations.get(agent) || 0) !== invalidation) return;
+        if (result.error) {
+          assignmentResults.delete(agent);
+          assignmentCompletedAt.delete(agent);
+          return;
+        }
         assignmentResults.set(agent, result);
         assignmentCompletedAt.set(agent, Date.now());
       });
       return promise;
     }
 
-    async function renderAgents(agents, state) {
-      const generation = ++agentRenderGen;
-      latestAgentState = state || {};
-      const section = document.getElementById("agents-section");
+    function renderAgentCards(owned, state, assignmentSets) {
       const list = document.getElementById("agents-list");
-      const owned = Array.isArray(agents) ? agents : [];
-      section.classList.toggle("hidden", owned.length === 0);
-      if (!owned.length) { list.innerHTML = ""; return; }
-      const assignmentSets = await Promise.all(owned.map(loadAssignmentsForAgent));
-      if (generation !== agentRenderGen) return;
       const drafts = captureAgentDrafts();
       const focus = captureAgentFocus();
       list.innerHTML = owned.map((agent, index) => {
         const sessions = (state.session || []).filter(s => s._github_login === agent).map(s =>
-          `<li><a href="/sessions/${encodeURIComponent(s.id)}">${esc(s.id)}</a> — ${esc(s.status)}</li>`
+          `<li>${sessionLink(s.id)} — ${esc(s.status)}</li>`
         ).join("") || "<li>No sessions.</li>";
         const assignmentResult = assignmentSets[index];
-        const assignments = assignmentResult.error
+        const assignments = assignmentResult.loading
+          ? '<p class="assignment-load-state">Loading assignments…</p>'
+          : assignmentResult.error
           ? `<p class="assignment-load-error">Could not load assignments: ${esc(assignmentResult.error)}</p>`
           : assignmentResult.assignments.map(a => {
           const comments = (a.comments || []).map(c => {
@@ -683,6 +709,22 @@
       }).join("");
       restoreAgentFormState(drafts);
       restoreAgentFocus(focus);
+    }
+
+    async function renderAgents(agents, state) {
+      const generation = ++agentRenderGen;
+      latestAgentState = state || {};
+      const section = document.getElementById("agents-section");
+      const list = document.getElementById("agents-list");
+      const owned = Array.isArray(agents) ? agents : [];
+      section.classList.toggle("hidden", owned.length === 0);
+      if (!owned.length) { list.innerHTML = ""; return; }
+      renderAgentCards(owned, latestAgentState, owned.map(agent =>
+        assignmentResults.get(agent) || { assignments: [], error: null, loading: true }
+      ));
+      const assignmentSets = await Promise.all(owned.map(loadAssignmentsForAgent));
+      if (generation !== agentRenderGen) return;
+      renderAgentCards(owned, latestAgentState, assignmentSets);
     }
 
     function repaintAgents() {
@@ -840,8 +882,7 @@
       stateInflight = { ctl: stateCtl, p, gen };
       p.then(data => {
         if (!stateInflight || stateInflight.gen !== gen) return;
-        const err = document.getElementById("err");
-        err.hidden = true;
+        clearError();
         document.getElementById("stamp").textContent = data.generated_at;
         const tasks = (data.task || []).filter(t => t.state !== "done" && t.state !== "failed");
         const working = (data.agent || []).filter(a => a.status === "working");
@@ -995,6 +1036,7 @@
           }
           if (sessionEpoch !== agentSessionEpoch || login !== window.__login) return;
           form.reset();
+          clearError();
           succeeded = true;
         } catch (e) {
           if (sessionEpoch !== agentSessionEpoch || login !== window.__login) return;
@@ -1063,6 +1105,7 @@
           }
           if (sessionEpoch !== agentSessionEpoch || login !== window.__login) return;
           form.reset();
+          clearError();
           succeeded = true;
         } catch (e) {
           if (sessionEpoch !== agentSessionEpoch || login !== window.__login) return;

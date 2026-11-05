@@ -13,7 +13,10 @@
 
 Every list on the website, and every array of rows in `GET /api/state`, is **newest first**. Newest means the latest change, not insertion order and not alphabetical id.
 
-The sole exception is `GET /api/sessions/{id}/timeline`: a timeline is a log and is therefore oldest first.
+There are two documented exceptions:
+
+- `GET /api/sessions/{id}/timeline` is a log and is therefore oldest first.
+- The owned-agents list (`GET /auth/me` `owned_agents` and the dashboard **Agents** section) follows the roster in `teams.yaml`, sorted by login, because roster entries carry no change time.
 
 - Store tables (`session`, `task`, `pings`, and the other replica keys in `/api/state`): `row_replica.updated_at` descending, then `row_id` descending.
 - Devices: `created_at` descending, then `id` descending.
