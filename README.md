@@ -77,11 +77,11 @@ Website API endpoints are documented in [PROTOCOL.md](PROTOCOL.md):
 - `POST /api/assignments` and `GET /api/assignments?agent=<login>`
 - `POST /api/assignments/{owner}/{name}/{number}/comments`
 - `GET /api/usage`
-- `GET /session?id=<id>` and `GET /api/session-timeline?id=<id>` (path-based session routes remain supported)
+- `GET /session?id=<id>`, `GET /api/session?id=<id>`, `GET /api/session/terminal?id=<id>`, `POST /api/session/control?id=<id>`, and `GET /api/session-timeline?id=<id>` (path-based session routes remain supported)
 
 The hub uses only the signed-in human's stored OAuth token for GitHub issue and comment writes. Tokens never enter API responses, activity rows, or browser cookies. Devices remain the sole write owners of their rows; website actions use synthetic `web:<login>` activity origins.
 
-Assignment and reply writes accept an optional lowercase UUID `request_id`. The dashboard keeps the same UUID after a timeout or network error, and the hub appends `<!-- agent-core-request:<request_id> -->` to the GitHub issue or comment. The hub reserves each actor, activity type, and request id while the write is in progress; a concurrent request returns 409. A later retry reuses the recorded or marker-matched GitHub write and returns 200 when the matching activity was already recorded, preventing duplicate issues and comments after an ambiguous timeout.
+Assignment and reply writes accept an optional lowercase UUID `request_id`. The dashboard keeps the same UUID and exact request payload in `sessionStorage` across reloads and sign-in renewal after a timeout or network error, and the hub appends `<!-- agent-core-request:<request_id> -->` to the GitHub issue or comment. The hub binds the id to a fingerprint of the normalized request and reserves each actor, activity type, and request id while the write is in progress; a concurrent request returns 409, as does reuse with different content. A later retry reuses the recorded or marker-matched GitHub write and returns 200 when the matching activity was already recorded, preventing duplicate issues and comments after an ambiguous timeout. Recording the activity and completing its reservation are one transaction, so a superseded lease owner cannot publish a second event.
 
 ## Tests
 

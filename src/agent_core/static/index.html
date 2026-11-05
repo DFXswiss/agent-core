@@ -551,6 +551,36 @@
       return JSON.stringify(["reply", form.dataset.agent || "", form.dataset.repo || "", form.dataset.number || ""]);
     }
 
+    function pendingRequestKey(login, formKey) {
+      return "agent-core:pending:" + login + ":" + formKey;
+    }
+
+    function pendingRequestStorage() {
+      try { return sessionStorage; } catch (e) { return null; }
+    }
+
+    // Without usable storage the id already on the form is kept, so a retry in the
+    // same page still reuses it; the hub's fingerprint check refuses changed content.
+    function pendingRequestId(storage, key, payloadJson, formRequestId) {
+      const requestId = crypto.randomUUID();
+      try {
+        const raw = storage.getItem(key);
+        if (raw) {
+          let entry = null;
+          try { entry = JSON.parse(raw); } catch (e) { /* replace invalid entries */ }
+          if (entry && typeof entry.request_id === "string" && entry.request_id && entry.payload === payloadJson) return entry.request_id;
+        }
+        storage.setItem(key, JSON.stringify({ request_id: requestId, payload: payloadJson }));
+        return requestId;
+      } catch (e) {
+        return formRequestId || requestId;
+      }
+    }
+
+    function forgetPendingRequest(storage, key) {
+      try { storage.removeItem(key); } catch (e) { /* storage is optional */ }
+    }
+
     function clearRenderedRequestIds(formKey) {
       document.querySelectorAll("#agents-list .assign-form, #agents-list .reply-form").forEach(form => {
         if (agentFormKey(form) === formKey) delete form.dataset.requestId;
@@ -656,7 +686,10 @@
     function requestIdIsFinal(status, detail) {
       if (status >= 200 && status < 300) return true;
       if (status === 400 || status === 403 || status === 404) return true;
-      return status === 409 && detail === "sign in on the website again";
+      return status === 409 && (
+        detail === "sign in on the website again" ||
+        detail === "request id was used for different content; reload the assignment list"
+      );
     }
 
     function loadAssignmentsForAgent(agent) {
@@ -808,7 +841,7 @@
       }
       openSessionId = id;
       document.getElementById("term").textContent = "";
-      const res = await fetch("/api/sessions/" + encodeURIComponent(id));
+      const res = await fetch("/api/session?id=" + encodeURIComponent(id));
       if (!res.ok) throw new Error("HTTP " + res.status);
       const s = await res.json();
       document.getElementById("session-detail").classList.remove("hidden");
@@ -827,7 +860,7 @@
       } else {
         document.getElementById("device-offline").classList.add("hidden");
       }
-      termEs = new EventSource("/api/sessions/" + encodeURIComponent(id) + "/terminal");
+      termEs = new EventSource("/api/session/terminal?id=" + encodeURIComponent(id));
       termEs.onmessage = (ev) => {
         try {
           const msg = JSON.parse(ev.data);
@@ -856,7 +889,7 @@
 
     async function postControl(body) {
       if (!openSessionId) return;
-      const res = await fetch("/api/sessions/" + encodeURIComponent(openSessionId) + "/control", {
+      const res = await fetch("/api/session/control?id=" + encodeURIComponent(openSessionId), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -1050,11 +1083,15 @@
         ev.preventDefault();
         const formKey = agentFormKey(form);
         if (agentFormsInFlight.has(formKey)) return;
-        if (!form.dataset.requestId) form.dataset.requestId = crypto.randomUUID();
         const sessionEpoch = agentSessionEpoch;
         const login = window.__login;
         const fd = new FormData(form);
-        const payload = { agent: form.dataset.agent, repo: fd.get("repo"), title: fd.get("title"), body: fd.get("body"), request_id: form.dataset.requestId };
+        const requestPayload = { agent: form.dataset.agent, repo: fd.get("repo"), title: fd.get("title"), body: fd.get("body") };
+        const payloadJson = JSON.stringify(requestPayload);
+        const pendingKey = pendingRequestKey(login, formKey);
+        const pendingStorage = pendingRequestStorage();
+        form.dataset.requestId = pendingRequestId(pendingStorage, pendingKey, payloadJson, form.dataset.requestId);
+        const payload = { ...requestPayload, request_id: form.dataset.requestId };
         let succeeded = false;
         const postCtl = new AbortController();
         const postTimeout = setTimeout(() => postCtl.abort(), 30000);
@@ -1066,6 +1103,7 @@
           if (!res.ok) {
             const failure = await responseJson(res);
             if (requestIdIsFinal(res.status, failure.detail)) {
+              forgetPendingRequest(pendingStorage, pendingKey);
               delete form.dataset.requestId;
               clearRenderedRequestIds(formKey);
             }
@@ -1080,6 +1118,7 @@
             return;
           }
           if (requestIdIsFinal(res.status, "")) {
+            forgetPendingRequest(pendingStorage, pendingKey);
             delete form.dataset.requestId;
             clearRenderedRequestIds(formKey);
           }
@@ -1132,10 +1171,14 @@
         ev.preventDefault();
         const formKey = agentFormKey(form);
         if (agentFormsInFlight.has(formKey)) return;
-        if (!form.dataset.requestId) form.dataset.requestId = crypto.randomUUID();
         const sessionEpoch = agentSessionEpoch;
         const login = window.__login;
         const fd = new FormData(form);
+        const requestPayload = { body: fd.get("body") };
+        const payloadJson = JSON.stringify(requestPayload);
+        const pendingKey = pendingRequestKey(login, formKey);
+        const pendingStorage = pendingRequestStorage();
+        form.dataset.requestId = pendingRequestId(pendingStorage, pendingKey, payloadJson, form.dataset.requestId);
         const parts = (form.dataset.repo || "").split("/");
         const url = "/api/assignments/" + encodeURIComponent(parts[0]) + "/" + encodeURIComponent(parts[1]) + "/" + encodeURIComponent(form.dataset.number) + "/comments";
         let succeeded = false;
@@ -1145,10 +1188,11 @@
         agentFormsInFlight.add(formKey);
         setFormBusy(form, true);
         try {
-          const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ body: fd.get("body"), request_id: form.dataset.requestId }), signal: postCtl.signal });
+          const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...requestPayload, request_id: form.dataset.requestId }), signal: postCtl.signal });
           if (!res.ok) {
             const failure = await responseJson(res);
             if (requestIdIsFinal(res.status, failure.detail)) {
+              forgetPendingRequest(pendingStorage, pendingKey);
               delete form.dataset.requestId;
               clearRenderedRequestIds(formKey);
             }
@@ -1158,6 +1202,7 @@
             return;
           }
           if (requestIdIsFinal(res.status, "")) {
+            forgetPendingRequest(pendingStorage, pendingKey);
             delete form.dataset.requestId;
             clearRenderedRequestIds(formKey);
           }

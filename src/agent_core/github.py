@@ -389,9 +389,9 @@ class RealGitHub(GitHub):
 
 
 def _comment_page_items(body: Any) -> list[dict[str, Any]]:
-    if not isinstance(body, list):
+    if not isinstance(body, list) or not all(isinstance(item, dict) for item in body):
         raise GitHubError("GitHub comment lookup returned an invalid response")
-    return [item for item in body if isinstance(item, dict)]
+    return body
 
 
 def _link_page(link_header: str, relation: str) -> int | None:

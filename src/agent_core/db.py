@@ -102,6 +102,7 @@ class Store:
             "CREATE TABLE IF NOT EXISTS request_reservation ("
             "actor TEXT, activity_type TEXT, request_id TEXT, status TEXT NOT NULL, "
             "lease_until TEXT NOT NULL, owner TEXT NOT NULL DEFAULT '', "
+            "fingerprint TEXT NOT NULL DEFAULT '', "
             "PRIMARY KEY (actor, activity_type, request_id))"
         )
         columns = {
@@ -110,6 +111,10 @@ class Store:
         if "owner" not in columns:
             self._conn.execute(
                 "ALTER TABLE request_reservation ADD COLUMN owner TEXT NOT NULL DEFAULT ''"
+            )
+        if "fingerprint" not in columns:
+            self._conn.execute(
+                "ALTER TABLE request_reservation ADD COLUMN fingerprint TEXT NOT NULL DEFAULT ''"
             )
 
     def close(self) -> None:
@@ -177,6 +182,7 @@ class Store:
         actor: str,
         activity_type: str,
         request_id: str,
+        fingerprint: str,
         owner: str,
         now: str,
         lease_until: str,
@@ -185,18 +191,27 @@ class Store:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
                 row = self._conn.execute(
-                    "SELECT status, lease_until FROM request_reservation "
+                    "SELECT status, lease_until, fingerprint FROM request_reservation "
                     "WHERE actor = ? AND activity_type = ? AND request_id = ?",
                     (actor, activity_type, request_id),
                 ).fetchone()
                 if row is None:
                     self._conn.execute(
                         "INSERT INTO request_reservation "
-                        "(actor, activity_type, request_id, status, lease_until, owner) "
-                        "VALUES (?, ?, ?, 'pending', ?, ?)",
-                        (actor, activity_type, request_id, lease_until, owner),
+                        "(actor, activity_type, request_id, status, lease_until, owner, fingerprint) "
+                        "VALUES (?, ?, ?, 'pending', ?, ?, ?)",
+                        (
+                            actor,
+                            activity_type,
+                            request_id,
+                            lease_until,
+                            owner,
+                            fingerprint,
+                        ),
                     )
                     result = "reserved"
+                elif row["fingerprint"] != fingerprint:
+                    result = "conflict"
                 elif row["status"] == "done":
                     result = "done"
                 elif row["lease_until"] > now:
@@ -265,33 +280,95 @@ class Store:
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
-                last = self._conn.execute(
-                    "SELECT COALESCE(MAX(origin_seq), 0) AS m FROM ledger_event "
-                    "WHERE origin_device_id = ?",
-                    (origin,),
-                ).fetchone()
-                seq = int(last["m"]) + 1 if last is not None else 1
-                self._conn.execute(
-                    "INSERT INTO ledger_event (origin_device_id, origin_seq, table_name, op, row_id, payload, occurred_at, received_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (origin, seq, table, op, row_id, encoded, occurred, occurred),
+                self._record_web_event(
+                    origin, login, table, op, row_id, encoded, occurred
                 )
-                if op == "delete":
-                    self._conn.execute(
-                        "DELETE FROM row_replica WHERE table_name = ? AND row_id = ?",
-                        (table, row_id),
-                    )
-                else:
-                    self._conn.execute(
-                        "INSERT INTO row_replica (table_name, row_id, origin_device_id, github_login, payload, updated_at) "
-                        "VALUES (?, ?, ?, ?, ?, ?) "
-                        "ON CONFLICT(table_name, row_id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at",
-                        (table, row_id, origin, login, encoded, occurred),
-                    )
                 self._conn.commit()
             except Exception:
                 self._conn.rollback()
                 raise
+
+    def record_web_event_for_request(
+        self,
+        origin: str,
+        login: str,
+        table: str,
+        op: str,
+        row_id: str,
+        encoded: str,
+        occurred: str,
+        *,
+        actor: str,
+        activity_type: str,
+        request_id: str,
+        owner: str,
+    ) -> bool:
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                reservation = self._conn.execute(
+                    "SELECT status, owner FROM request_reservation "
+                    "WHERE actor = ? AND activity_type = ? AND request_id = ?",
+                    (actor, activity_type, request_id),
+                ).fetchone()
+                if (
+                    reservation is None
+                    or reservation["status"] != "pending"
+                    or reservation["owner"] != owner
+                ):
+                    self._conn.commit()
+                    return False
+                self._record_web_event(
+                    origin, login, table, op, row_id, encoded, occurred
+                )
+                updated = self._conn.execute(
+                    "UPDATE request_reservation SET status = 'done' "
+                    "WHERE actor = ? AND activity_type = ? AND request_id = ? "
+                    "AND status = 'pending' AND owner = ?",
+                    (actor, activity_type, request_id, owner),
+                )
+                if updated.rowcount != 1:
+                    self._conn.rollback()
+                    return False
+                self._conn.commit()
+                return True
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    def _record_web_event(
+        self,
+        origin: str,
+        login: str,
+        table: str,
+        op: str,
+        row_id: str,
+        encoded: str,
+        occurred: str,
+    ) -> None:
+        last = self._conn.execute(
+            "SELECT COALESCE(MAX(origin_seq), 0) AS m FROM ledger_event "
+            "WHERE origin_device_id = ?",
+            (origin,),
+        ).fetchone()
+        seq = int(last["m"]) + 1 if last is not None else 1
+        self._conn.execute(
+            "INSERT INTO ledger_event (origin_device_id, origin_seq, table_name, op, row_id, payload, occurred_at, received_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (origin, seq, table, op, row_id, encoded, occurred, occurred),
+        )
+        if op == "delete":
+            self._conn.execute(
+                "DELETE FROM row_replica WHERE table_name = ? AND row_id = ?",
+                (table, row_id),
+            )
+        else:
+            self._conn.execute(
+                "INSERT INTO row_replica (table_name, row_id, origin_device_id, github_login, payload, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(table_name, row_id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at",
+                (table, row_id, origin, login, encoded, occurred),
+            )
 
     def put_oauth_token(self, github_login: str, token: str) -> None:
         self.execute(

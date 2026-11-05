@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
 import secrets
 import time
@@ -503,25 +504,33 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         title = _bounded_body_string(body, "title", 1, 256)
         issue_body = _bounded_body_string(body, "body", 1, 60000)
         request_id = _optional_request_id(body)
+        request_fingerprint = _request_fingerprint(
+            {"repo": repo, "title": title, "body": issue_body, "agent": agent}
+        )
         request_owner = uuid.uuid4().hex
         if request_id is not None:
-            replay = _assignment_request_replay(hub, actor, "assignment.created", request_id)
-            if replay is not None:
-                response = _assignment_create_response(replay)
-                if response is not None:
-                    return JSONResponse(response, status_code=200)
             now, lease_until = _request_lease_times()
             reservation = hub.store.reserve_request(
                 actor,
                 "assignment.created",
                 request_id,
+                request_fingerprint,
                 request_owner,
                 now,
                 lease_until,
             )
+            if reservation == "conflict":
+                raise HTTPException(
+                    status_code=409,
+                    detail="request id was used for different content; reload the assignment list",
+                )
             if reservation == "done":
                 replay = _assignment_request_replay(
-                    hub, actor, "assignment.created", request_id
+                    hub,
+                    actor,
+                    "assignment.created",
+                    request_id,
+                    request_fingerprint,
                 )
                 response = _assignment_create_response(replay) if replay is not None else None
                 if response is not None:
@@ -667,10 +676,26 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         }
         if request_id is not None:
             event_payload["payload"]["request_id"] = request_id
-        _record_web_event(hub, actor, "activity", "insert", activity_id, event_payload)
-        if request_id is not None:
-            hub.store.finish_request(
-                actor, "assignment.created", request_id, request_owner
+            event_payload["payload"]["request_fingerprint"] = request_fingerprint
+            recorded = _record_web_event_for_request(
+                hub,
+                actor,
+                "activity",
+                "insert",
+                activity_id,
+                event_payload,
+                activity_type="assignment.created",
+                request_id=request_id,
+                owner=request_owner,
+            )
+            if not recorded:
+                raise HTTPException(
+                    status_code=409,
+                    detail="request is still in progress; retry shortly",
+                )
+        else:
+            _record_web_event(
+                hub, actor, "activity", "insert", activity_id, event_payload
             )
         await hub.publish({"type": "events", "login": actor, "count": 1})
         return JSONResponse(
@@ -747,23 +772,33 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
             raise HTTPException(status_code=404, detail="unknown issue")
         comment_body = _bounded_body_string(body, "body", 1, 60000)
         request_id = _optional_request_id(body)
+        request_fingerprint = _request_fingerprint(
+            {"owner": owner, "name": name, "number": number, "body": comment_body}
+        )
         request_owner = uuid.uuid4().hex
         if request_id is not None:
-            replay = _assignment_request_replay(hub, actor, "assignment.reply", request_id)
-            if replay is not None and isinstance(replay.get("url"), str):
-                return JSONResponse({"url": replay["url"]}, status_code=200)
             now, lease_until = _request_lease_times()
             reservation = hub.store.reserve_request(
                 actor,
                 "assignment.reply",
                 request_id,
+                request_fingerprint,
                 request_owner,
                 now,
                 lease_until,
             )
+            if reservation == "conflict":
+                raise HTTPException(
+                    status_code=409,
+                    detail="request id was used for different content; reload the assignment list",
+                )
             if reservation == "done":
                 replay = _assignment_request_replay(
-                    hub, actor, "assignment.reply", request_id
+                    hub,
+                    actor,
+                    "assignment.reply",
+                    request_id,
+                    request_fingerprint,
                 )
                 if replay is not None and isinstance(replay.get("url"), str):
                     return JSONResponse({"url": replay["url"]}, status_code=200)
@@ -868,10 +903,26 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         }
         if request_id is not None:
             event_payload["payload"]["request_id"] = request_id
-        _record_web_event(hub, actor, "activity", "insert", activity_id, event_payload)
-        if request_id is not None:
-            hub.store.finish_request(
-                actor, "assignment.reply", request_id, request_owner
+            event_payload["payload"]["request_fingerprint"] = request_fingerprint
+            recorded = _record_web_event_for_request(
+                hub,
+                actor,
+                "activity",
+                "insert",
+                activity_id,
+                event_payload,
+                activity_type="assignment.reply",
+                request_id=request_id,
+                owner=request_owner,
+            )
+            if not recorded:
+                raise HTTPException(
+                    status_code=409,
+                    detail="request is still in progress; retry shortly",
+                )
+        else:
+            _record_web_event(
+                hub, actor, "activity", "insert", activity_id, event_payload
             )
         hub.issue_cache.pop((actor, repo, number), None)
         hub.issue_cache.pop((actor, path_repo, path_number), None)
@@ -929,8 +980,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         out["devices"] = [row_dict(r) for r in devices]
         return out
 
-    @app.get("/api/sessions/{session_id}")
-    def api_session_detail(request: Request, session_id: str) -> dict[str, Any]:
+    def _session_detail_response(request: Request, session_id: str) -> dict[str, Any]:
         login = hub.session_login(request)
         row = _visible_session_row(hub, login, session_id)
         payload = loads(row["payload"])
@@ -945,6 +995,14 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
             "can_control": can_control(hub, login, origin),
             "control_connected": origin in hub.control_ready,
         }
+
+    @app.get("/api/session")
+    def api_session_detail_query(request: Request, id: str) -> dict[str, Any]:
+        return _session_detail_response(request, id)
+
+    @app.get("/api/sessions/{session_id}")
+    def api_session_detail(request: Request, session_id: str) -> dict[str, Any]:
+        return _session_detail_response(request, session_id)
 
     def _session_timeline_response(request: Request, session_id: str) -> dict[str, Any]:
         login = hub.session_login(request)
@@ -965,8 +1023,9 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
     def api_session_timeline(request: Request, session_id: str) -> dict[str, Any]:
         return _session_timeline_response(request, session_id)
 
-    @app.post("/api/sessions/{session_id}/control")
-    async def api_session_control(request: Request, session_id: str, body: dict[str, Any]) -> JSONResponse:
+    async def _session_control_response(
+        request: Request, session_id: str, body: dict[str, Any]
+    ) -> JSONResponse:
         login = _any_login(hub, request)
         if not isinstance(body, dict):
             raise HTTPException(status_code=400, detail="body must be an object")
@@ -990,8 +1049,19 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
             raise HTTPException(status_code=503, detail="control queue is full") from exc
         return JSONResponse({"queued": True}, status_code=202)
 
-    @app.get("/api/sessions/{session_id}/terminal")
-    async def api_session_terminal(request: Request, session_id: str):
+    @app.post("/api/session/control")
+    async def api_session_control_query(
+        request: Request, id: str, body: dict[str, Any]
+    ) -> JSONResponse:
+        return await _session_control_response(request, id, body)
+
+    @app.post("/api/sessions/{session_id}/control")
+    async def api_session_control(
+        request: Request, session_id: str, body: dict[str, Any]
+    ) -> JSONResponse:
+        return await _session_control_response(request, session_id, body)
+
+    async def _session_terminal_response(request: Request, session_id: str):
         login = hub.session_login(request)
         _visible_session_row(hub, login, session_id)
         accept = request.headers.get("accept") or ""
@@ -1023,6 +1093,14 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
             return StreamingResponse(gen(), media_type="text/event-stream")
         chunks = list(hub.terminal_rings.get(session_id, []))
         return {"session_id": session_id, "chunks": chunks}
+
+    @app.get("/api/session/terminal")
+    async def api_session_terminal_query(request: Request, id: str):
+        return await _session_terminal_response(request, id)
+
+    @app.get("/api/sessions/{session_id}/terminal")
+    async def api_session_terminal(request: Request, session_id: str):
+        return await _session_terminal_response(request, session_id)
 
     @app.post("/api/pings")
     async def api_ping(request: Request, body: dict[str, Any]) -> dict[str, str]:
@@ -1274,6 +1352,36 @@ def _record_web_event(
     hub.store.record_web_event(origin, login, table, op, row_id, encoded, occurred)
 
 
+def _record_web_event_for_request(
+    hub: Hub,
+    login: str,
+    table: str,
+    op: str,
+    row_id: str,
+    payload: dict[str, Any],
+    *,
+    activity_type: str,
+    request_id: str,
+    owner: str,
+) -> bool:
+    origin = f"web:{login}"
+    encoded = dumps(payload)
+    occurred = utcnow()
+    return hub.store.record_web_event_for_request(
+        origin,
+        login,
+        table,
+        op,
+        row_id,
+        encoded,
+        occurred,
+        actor=login,
+        activity_type=activity_type,
+        request_id=request_id,
+        owner=owner,
+    )
+
+
 def _request_actor(hub: Hub, request: Request) -> tuple[str, bool]:
     header = request.headers.get("authorization")
     if header is not None:
@@ -1336,6 +1444,10 @@ def _request_lease_times() -> tuple[str, str]:
     )
 
 
+def _request_fingerprint(payload: dict[str, Any]) -> str:
+    return hashlib.sha256(dumps(payload).encode("utf-8")).hexdigest()
+
+
 def _renew_request_or_conflict(
     hub: Hub,
     actor: str,
@@ -1373,7 +1485,11 @@ def _comment_author(comment: dict[str, Any]) -> str:
 
 
 def _assignment_request_replay(
-    hub: Hub, actor: str, activity_type: str, request_id: str
+    hub: Hub,
+    actor: str,
+    activity_type: str,
+    request_id: str,
+    request_fingerprint: str,
 ) -> dict[str, Any] | None:
     rows = hub.store.query(
         "SELECT payload FROM row_replica WHERE table_name = 'activity' "
@@ -1385,7 +1501,11 @@ def _assignment_request_replay(
         if not isinstance(payload, dict) or payload.get("type") != activity_type:
             continue
         inner = payload.get("payload")
-        if isinstance(inner, dict) and inner.get("request_id") == request_id:
+        if (
+            isinstance(inner, dict)
+            and inner.get("request_id") == request_id
+            and inner.get("request_fingerprint") == request_fingerprint
+        ):
             return inner
     return None
 

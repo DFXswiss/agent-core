@@ -26,6 +26,17 @@ ASSIGNMENT = {
 REQUEST_ID = "12345678-1234-1234-1234-123456789abc"
 
 
+def _assignment_fingerprint(payload: dict[str, str] = ASSIGNMENT) -> str:
+    return app_module._request_fingerprint(
+        {
+            "repo": payload["repo"],
+            "title": payload["title"],
+            "body": payload["body"],
+            "agent": payload["agent"].lower(),
+        }
+    )
+
+
 class _Response:
     def __init__(self, status_code: int, body: object, headers: dict[str, str] | None = None) -> None:
         self.status_code = status_code
@@ -208,14 +219,23 @@ def test_assignment_create_request_id_replays_recorded_success(
     state = agent_hub.get("/api/state").json()
     activity = next(row for row in state["activity"] if row.get("type") == "assignment.created")
     assert activity["payload"]["request_id"] == REQUEST_ID
+    assert activity["payload"]["request_fingerprint"] == _assignment_fingerprint()
     reservation = agent_hub.app.state.hub.store.query_one(
-        "SELECT owner, status FROM request_reservation WHERE request_id = ?",
+        "SELECT owner, status, fingerprint FROM request_reservation WHERE request_id = ?",
         (REQUEST_ID,),
     )
     assert reservation is not None
     assert reservation["status"] == "done"
+    assert reservation["fingerprint"] == _assignment_fingerprint()
     assert len(reservation["owner"]) == 32
     assert set(reservation["owner"]) <= set("0123456789abcdef")
+    events = agent_hub.app.state.hub.store.query(
+        "SELECT payload FROM ledger_event WHERE origin_device_id = ? "
+        "AND table_name = 'activity'",
+        ("web:alice",),
+    )
+    assert len(events) == 1
+    assert REQUEST_ID in events[0]["payload"]
 
 
 def test_assignment_create_recovers_after_timeout_that_created_the_issue(
@@ -275,6 +295,9 @@ def test_assignment_reply_request_id_replays_recorded_success(
     state = agent_hub.get("/api/state").json()
     activity = next(row for row in state["activity"] if row.get("type") == "assignment.reply")
     assert activity["payload"]["request_id"] == REQUEST_ID
+    assert activity["payload"]["request_fingerprint"] == app_module._request_fingerprint(
+        {"owner": "Acme", "name": "Widget", "number": 1, "body": "A reply."}
+    )
     assert replayed.json() == {"url": activity["payload"]["url"]}
 
 
@@ -323,6 +346,7 @@ def test_assignment_request_is_busy_without_calling_github(
         "alice",
         "assignment.created",
         REQUEST_ID,
+        _assignment_fingerprint(),
         "existing-owner",
         "2026-11-05T10:00:00Z",
         "9999-01-01T00:00:00Z",
@@ -340,6 +364,58 @@ def test_assignment_request_is_busy_without_calling_github(
     assert hub.github.issue_calls == calls_before
 
 
+def test_assignment_create_rejects_reserved_id_for_different_content_without_github(
+    agent_hub: TestClient,
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    hub = agent_hub.app.state.hub
+    assert hub.store.reserve_request(
+        "alice",
+        "assignment.created",
+        REQUEST_ID,
+        _assignment_fingerprint(dict(ASSIGNMENT, title="Different title")),
+        "existing-owner",
+        "2026-11-05T10:00:00Z",
+        "9999-01-01T00:00:00Z",
+    ) == "reserved"
+    calls_before = list(hub.github.issue_calls)
+
+    response = agent_hub.post(
+        "/api/assignments", json=dict(ASSIGNMENT, request_id=REQUEST_ID)
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "request id was used for different content; reload the assignment list"
+    }
+    assert hub.github.issue_calls == calls_before
+
+
+def test_assignment_reply_rejects_completed_id_for_different_content_without_github(
+    agent_hub: TestClient,
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    assert agent_hub.post("/api/assignments", json=ASSIGNMENT).status_code == 201
+    first = agent_hub.post(
+        "/api/assignments/Acme/Widget/1/comments",
+        json={"body": "First reply.", "request_id": REQUEST_ID},
+    )
+    assert first.status_code == 201, first.text
+    github: FakeGitHub = agent_hub.app.state.hub.github
+    calls_before = list(github.issue_calls)
+
+    response = agent_hub.post(
+        "/api/assignments/Acme/Widget/1/comments",
+        json={"body": "Changed reply.", "request_id": REQUEST_ID},
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "request id was used for different content; reload the assignment list"
+    }
+    assert github.issue_calls == calls_before
+
+
 def test_completed_assignment_request_without_replay_row_is_conflict(
     agent_hub: TestClient,
 ) -> None:
@@ -349,6 +425,7 @@ def test_completed_assignment_request_without_replay_row_is_conflict(
         "alice",
         "assignment.created",
         REQUEST_ID,
+        _assignment_fingerprint(),
         "existing-owner",
         "2026-11-05T10:00:00Z",
         "2026-11-05T10:02:00Z",
@@ -378,6 +455,7 @@ def test_assignment_expired_request_reservation_is_taken_over(
         "alice",
         "assignment.created",
         REQUEST_ID,
+        _assignment_fingerprint(),
         "expired-owner",
         "2000-01-01T00:00:00Z",
         "2000-01-01T00:02:00Z",
@@ -419,6 +497,7 @@ def test_assignment_takeover_stops_old_owner_before_github_write(
             "alice",
             "assignment.created",
             REQUEST_ID,
+            _assignment_fingerprint(),
             "new-owner",
             "2026-11-05T10:00:00Z",
             "9999-01-01T00:00:00Z",
@@ -443,6 +522,71 @@ def test_assignment_takeover_stops_old_owner_before_github_write(
     assert not [
         call for call in github.issue_calls if call["operation"] == "create_issue"
     ]
+
+
+def test_assignment_takeover_after_github_write_rejects_old_owner_without_event(
+    agent_hub: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    hub = agent_hub.app.state.hub
+    github: FakeGitHub = hub.github
+    original_issue = github.issue
+    published: list[dict[str, object]] = []
+
+    async def capture_publish(event: dict[str, object]) -> None:
+        published.append(event)
+
+    def take_over_after_write(*args):
+        reservation = hub.store.query_one(
+            "SELECT fingerprint FROM request_reservation WHERE request_id = ?",
+            (REQUEST_ID,),
+        )
+        assert reservation is not None
+        hub.store.execute(
+            "UPDATE request_reservation SET lease_until = ? WHERE request_id = ?",
+            ("2000-01-01T00:00:00Z", REQUEST_ID),
+        )
+        assert hub.store.reserve_request(
+            "alice",
+            "assignment.created",
+            REQUEST_ID,
+            reservation["fingerprint"],
+            "new-owner",
+            "2026-11-05T10:00:00Z",
+            "9999-01-01T00:00:00Z",
+        ) == "reserved"
+        return original_issue(*args)
+
+    monkeypatch.setattr(github, "issue", take_over_after_write)
+    monkeypatch.setattr(hub, "publish", capture_publish)
+    response = agent_hub.post(
+        "/api/assignments", json=dict(ASSIGNMENT, request_id=REQUEST_ID)
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "request is still in progress; retry shortly"
+    }
+    assert len(
+        [call for call in github.issue_calls if call["operation"] == "create_issue"]
+    ) == 1
+    assert hub.store.query(
+        "SELECT * FROM ledger_event WHERE origin_device_id = ? "
+        "AND table_name = 'activity'",
+        ("web:alice",),
+    ) == []
+    assert hub.store.query(
+        "SELECT * FROM row_replica WHERE origin_device_id = ? "
+        "AND table_name = 'activity'",
+        ("web:alice",),
+    ) == []
+    assert published == []
+    reservation = hub.store.query_one(
+        "SELECT owner, status FROM request_reservation WHERE request_id = ?",
+        (REQUEST_ID,),
+    )
+    assert reservation is not None
+    assert dict(reservation) == {"owner": "new-owner", "status": "pending"}
 
 
 def test_assignment_reply_renew_failure_stops_before_github_write(
@@ -1451,6 +1595,32 @@ def test_real_github_comments_rejects_non_list_page(
                 "Link": '<https://api.github.com/repos/Acme/Widget/issues/1/comments?per_page=100&page=2>; rel="last"'
             },
         )
+
+    monkeypatch.setattr(httpx, "request", request)
+
+    with pytest.raises(
+        GitHubError, match="GitHub comment lookup returned an invalid response"
+    ):
+        RealGitHub(cfg).issue_comments("tok-alice", "Acme/Widget", 1)
+
+
+@pytest.mark.parametrize("invalid_page", [1, 2])
+def test_real_github_comments_rejects_non_object_page_item(
+    cfg, monkeypatch: pytest.MonkeyPatch, invalid_page: int
+) -> None:
+    def request(_method: str, _url: str, **kwargs: object) -> _Response:
+        params = kwargs["params"]
+        assert isinstance(params, dict)
+        page = int(params.get("page", 1))
+        body: list[object] = [{"id": page}]
+        if page == invalid_page:
+            body.append("invalid comment")
+        headers: dict[str, str] = {}
+        if page == 1:
+            headers = {
+                "Link": '<https://api.github.com/repos/Acme/Widget/issues/1/comments?per_page=100&page=2>; rel="last"'
+            }
+        return _Response(200, body, headers)
 
     monkeypatch.setattr(httpx, "request", request)
 

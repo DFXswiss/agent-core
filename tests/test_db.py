@@ -78,21 +78,25 @@ def test_store_migrates_columns_without_losing_rows(tmp_path: Path) -> None:
 
         assert "confirmed_by" in columns
         assert "owner" in reservation_columns
+        assert "fingerprint" in reservation_columns
         assert row is not None
         assert row["github_login"] == "alice"
         assert row["confirmed_by"] is None
         assert reservation is not None
         assert reservation["owner"] == ""
+        assert reservation["fingerprint"] == ""
     finally:
         store.close()
 
     reopened = Store(str(database))
     try:
         reservation = reopened.query_one(
-            "SELECT owner FROM request_reservation WHERE request_id = ?", ("old-request",)
+            "SELECT owner, fingerprint FROM request_reservation WHERE request_id = ?",
+            ("old-request",),
         )
         assert reservation is not None
         assert reservation["owner"] == ""
+        assert reservation["fingerprint"] == ""
     finally:
         reopened.close()
 
@@ -102,15 +106,35 @@ def test_request_reservation_busy_expiry_finish_and_release(tmp_path: Path) -> N
     key = ("alice", "assignment.created", "request-one")
     first_owner = "owner-one"
     second_owner = "owner-two"
+    fingerprint = "fingerprint-one"
     try:
         assert store.reserve_request(
-            *key, first_owner, "2026-11-05T10:00:00Z", "2026-11-05T10:02:00Z"
+            *key,
+            fingerprint,
+            first_owner,
+            "2026-11-05T10:00:00Z",
+            "2026-11-05T10:02:00Z",
         ) == "reserved"
         assert store.reserve_request(
-            *key, second_owner, "2026-11-05T10:01:00Z", "2026-11-05T10:03:00Z"
+            *key,
+            fingerprint,
+            second_owner,
+            "2026-11-05T10:01:00Z",
+            "2026-11-05T10:03:00Z",
         ) == "busy"
         assert store.reserve_request(
-            *key, second_owner, "2026-11-05T10:02:00Z", "2026-11-05T10:04:00Z"
+            *key,
+            "different-fingerprint",
+            second_owner,
+            "2026-11-05T10:01:00Z",
+            "2026-11-05T10:03:00Z",
+        ) == "conflict"
+        assert store.reserve_request(
+            *key,
+            fingerprint,
+            second_owner,
+            "2026-11-05T10:02:00Z",
+            "2026-11-05T10:04:00Z",
         ) == "reserved"
         assert not store.renew_request(
             *key,
@@ -128,16 +152,28 @@ def test_request_reservation_busy_expiry_finish_and_release(tmp_path: Path) -> N
         )
         assert store.finish_request(*key, second_owner)
         assert store.reserve_request(
-            *key, "owner-three", "2026-11-05T10:05:00Z", "2026-11-05T10:07:00Z"
+            *key,
+            fingerprint,
+            "owner-three",
+            "2026-11-05T10:05:00Z",
+            "2026-11-05T10:07:00Z",
         ) == "done"
 
         released = ("alice", "assignment.reply", "request-two")
         assert store.reserve_request(
-            *released, first_owner, "2026-11-05T10:00:00Z", "2026-11-05T10:02:00Z"
+            *released,
+            fingerprint,
+            first_owner,
+            "2026-11-05T10:00:00Z",
+            "2026-11-05T10:02:00Z",
         ) == "reserved"
         assert store.release_request(*released, first_owner)
         assert store.reserve_request(
-            *released, second_owner, "2026-11-05T10:00:01Z", "2026-11-05T10:02:01Z"
+            *released,
+            fingerprint,
+            second_owner,
+            "2026-11-05T10:00:01Z",
+            "2026-11-05T10:02:01Z",
         ) == "reserved"
     finally:
         store.close()
@@ -220,6 +256,107 @@ def test_record_web_event_rolls_back_ledger_when_replica_write_fails(tmp_path: P
 
         assert store.query("SELECT * FROM ledger_event") == []
         assert store.query("SELECT * FROM row_replica") == []
+    finally:
+        store.close()
+
+
+def test_record_web_event_for_request_records_once_and_finishes(tmp_path: Path) -> None:
+    store = Store(str(tmp_path / "request-event.sqlite"))
+    key = ("alice", "assignment.created", "request-one")
+    try:
+        assert store.reserve_request(
+            *key,
+            "fingerprint-one",
+            "owner-one",
+            "2026-11-05T10:00:00Z",
+            "2026-11-05T10:02:00Z",
+        ) == "reserved"
+
+        assert store.record_web_event_for_request(
+            "web:alice",
+            "alice",
+            "activity",
+            "insert",
+            "activity-one",
+            '{"id":"activity-one"}',
+            "2026-11-05T10:01:00Z",
+            actor=key[0],
+            activity_type=key[1],
+            request_id=key[2],
+            owner="owner-one",
+        )
+
+        reservation = store.query_one(
+            "SELECT status FROM request_reservation WHERE actor = ? "
+            "AND activity_type = ? AND request_id = ?",
+            key,
+        )
+        assert reservation is not None
+        assert reservation["status"] == "done"
+        assert len(store.query("SELECT * FROM ledger_event")) == 1
+        assert len(store.query("SELECT * FROM row_replica")) == 1
+        assert not store.record_web_event_for_request(
+            "web:alice",
+            "alice",
+            "activity",
+            "insert",
+            "activity-two",
+            '{"id":"activity-two"}',
+            "2026-11-05T10:01:01Z",
+            actor=key[0],
+            activity_type=key[1],
+            request_id=key[2],
+            owner="owner-one",
+        )
+        assert len(store.query("SELECT * FROM ledger_event")) == 1
+        assert len(store.query("SELECT * FROM row_replica")) == 1
+    finally:
+        store.close()
+
+
+def test_record_web_event_for_request_rejects_owner_after_takeover(
+    tmp_path: Path,
+) -> None:
+    store = Store(str(tmp_path / "request-takeover.sqlite"))
+    key = ("alice", "assignment.created", "request-one")
+    try:
+        assert store.reserve_request(
+            *key,
+            "fingerprint-one",
+            "old-owner",
+            "2026-11-05T10:00:00Z",
+            "2026-11-05T10:01:00Z",
+        ) == "reserved"
+        assert store.reserve_request(
+            *key,
+            "fingerprint-one",
+            "new-owner",
+            "2026-11-05T10:01:00Z",
+            "2026-11-05T10:03:00Z",
+        ) == "reserved"
+
+        assert not store.record_web_event_for_request(
+            "web:alice",
+            "alice",
+            "activity",
+            "insert",
+            "activity-one",
+            '{"id":"activity-one"}',
+            "2026-11-05T10:01:01Z",
+            actor=key[0],
+            activity_type=key[1],
+            request_id=key[2],
+            owner="old-owner",
+        )
+
+        assert store.query("SELECT * FROM ledger_event") == []
+        assert store.query("SELECT * FROM row_replica") == []
+        reservation = store.query_one(
+            "SELECT owner, status FROM request_reservation WHERE request_id = ?",
+            (key[2],),
+        )
+        assert reservation is not None
+        assert dict(reservation) == {"owner": "new-owner", "status": "pending"}
     finally:
         store.close()
 

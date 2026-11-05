@@ -409,7 +409,7 @@ def test_index_agent_render_preserves_forms_and_handles_fetch_lifecycle() -> Non
         assert "clearTimeout(postTimeout)" in handler
         assert "agentPostControllers.delete(postCtl)" in handler
         assert "Request did not complete — check the assignment list before submitting again" in handler
-        assert "if (!form.dataset.requestId) form.dataset.requestId = crypto.randomUUID()" in handler
+        assert "form.dataset.requestId = pendingRequestId(pendingStorage, pendingKey, payloadJson, form.dataset.requestId);" in handler
         assert "request_id:" in handler
         assert "delete form.dataset.requestId" in handler
         timeout_block = handler.split("catch (e)", 1)[1].split("finally", 1)[0]
