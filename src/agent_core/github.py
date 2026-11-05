@@ -421,7 +421,8 @@ class FakeGitHub(GitHub):
 
     def issue(self, token: str, repo: str, number: int) -> dict[str, Any]:
         self.issue_calls.append({"operation": "issue", "token": token, "repo": repo, "number": number})
-        issue = self.issues.get((repo, number))
+        canonical_repo = self.canonical_repos.get(repo.lower(), repo)
+        issue = self.issues.get((canonical_repo, number))
         if issue is None:
             raise GitHubError("GitHub request failed: HTTP 404: Not Found")
         return dict(issue)
@@ -436,7 +437,8 @@ class FakeGitHub(GitHub):
                 "assignees": list(assignees),
             }
         )
-        issue = self.issues.get((repo, number))
+        canonical_repo = self.canonical_repos.get(repo.lower(), repo)
+        issue = self.issues.get((canonical_repo, number))
         if issue is None:
             raise GitHubError("GitHub request failed: HTTP 404: Not Found")
         if not self.omit_assignees_after_add:
@@ -444,16 +446,21 @@ class FakeGitHub(GitHub):
         return dict(issue)
 
     def create_issue_comment(self, token: str, repo: str, number: int, body: str) -> dict[str, Any]:
-        if (repo, number) not in self.issues:
+        canonical_repo = self.canonical_repos.get(repo.lower(), repo)
+        if (canonical_repo, number) not in self.issues:
             raise GitHubError("GitHub request failed: HTTP 404: Not Found")
         author = token.removeprefix("tok-") if token.startswith("tok-") else "unknown"
+        comment_number = len(self.comments.get((canonical_repo, number), [])) + 1
         comment = {
-            "html_url": f"https://github.test/{repo}/issues/{number}#issuecomment-{len(self.comments.get((repo, number), [])) + 1}",
+            "html_url": (
+                f"https://github.test/{canonical_repo}/issues/{number}"
+                f"#issuecomment-{comment_number}"
+            ),
             "user": {"login": author},
             "created_at": "2026-11-04T12:00:00Z",
             "body": body,
         }
-        self.comments.setdefault((repo, number), []).append(comment)
+        self.comments.setdefault((canonical_repo, number), []).append(comment)
         self.issue_calls.append(
             {
                 "operation": "create_issue_comment",

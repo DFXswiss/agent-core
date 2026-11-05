@@ -62,7 +62,7 @@ See [PROTOCOL.md](PROTOCOL.md).
 
 ## Control
 
-Anyone who can see a session may watch its live terminal on the website. Start, stop, type, and resize are allowed when the signed-in person owns the session's origin device or owns the agent login paired to that device, and that device has a control-ready WebSocket. The hub relays control and terminal bytes; it does not run processes and does not author session rows. Details are in [PROTOCOL.md](PROTOCOL.md).
+Anyone who can see a session may watch its live terminal on the website. Start, stop, type, and resize are allowed only when the session's origin device row exists, is not revoked, and its `github_login` either equals the signed-in actor or is an agent login that actor owns; the origin device must also have a control-ready WebSocket. The hub relays control and terminal bytes; it does not run processes and does not author session rows. Details are in [PROTOCOL.md](PROTOCOL.md).
 
 ## Agent operations
 

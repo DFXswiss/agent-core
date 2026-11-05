@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import httpx
@@ -357,6 +358,96 @@ def test_assignment_list_returns_newest_20_of_130_fake_comments(agent_hub: TestC
     assert [comment["body"] for comment in comments] == [
         f"comment-{index:03d}" for index in range(129, 109, -1)
     ]
+
+
+def test_assignment_list_enriches_only_newest_50(agent_hub: TestClient) -> None:
+    sign_in(agent_hub, "code-alice")
+    hub = agent_hub.app.state.hub
+    github: FakeGitHub = hub.github
+    for number in range(1, 53):
+        github.issues[("Acme/Widget", number)] = {
+            "number": number,
+            "html_url": f"https://github.test/Acme/Widget/issues/{number}",
+            "repository_url": "https://api.github.test/repos/Acme/Widget",
+            "state": "open",
+            "assignees": [{"login": "helperbot"}],
+        }
+        hub.store.execute(
+            "INSERT INTO row_replica (table_name, row_id, origin_device_id, github_login, payload, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "activity",
+                f"assignment-{number:02d}",
+                "web:alice",
+                "alice",
+                dumps(
+                    {
+                        "id": f"assignment-{number:02d}",
+                        "type": "assignment.created",
+                        "payload": {
+                            "agent": "helperbot",
+                            "actor": "alice",
+                            "repo": "Acme/Widget",
+                            "number": number,
+                            "title": f"assignment-{number:02d}",
+                        },
+                    }
+                ),
+                f"2026-11-05T10:{number:02d}:00Z",
+            ),
+        )
+
+    response = agent_hub.get("/api/assignments", params={"agent": "helperbot"})
+
+    assert response.status_code == 200
+    rows = response.json()["assignments"]
+    assert [row["number"] for row in rows] == list(range(52, 0, -1))
+    assert [row["enriched"] for row in rows] == [True] * 50 + [False] * 2
+    assert len([call for call in github.issue_calls if call["operation"] == "issue"]) == 50
+    assert (
+        len([call for call in github.issue_calls if call["operation"] == "issue_comments"])
+        == 50
+    )
+
+
+def test_assignment_list_prunes_and_bounds_issue_cache(agent_hub: TestClient) -> None:
+    sign_in(agent_hub, "code-alice")
+    hub = agent_hub.app.state.hub
+    now = time.monotonic()
+    hub.issue_cache[("alice", "expired/old", 1)] = (now - 2, {})
+    hub.issue_cache[("alice", "expired/new", 2)] = (now - 1, {})
+    for number in range(502):
+        hub.issue_cache[("alice", "Acme/Widget", number)] = (now + number + 1, {})
+
+    response = agent_hub.get("/api/assignments", params={"agent": "helperbot"})
+
+    assert response.status_code == 200
+    assert len(hub.issue_cache) == 500
+    assert ("alice", "expired/old", 1) not in hub.issue_cache
+    assert ("alice", "expired/new", 2) not in hub.issue_cache
+    assert ("alice", "Acme/Widget", 0) not in hub.issue_cache
+    assert ("alice", "Acme/Widget", 1) not in hub.issue_cache
+    assert ("alice", "Acme/Widget", 2) in hub.issue_cache
+
+
+def test_fake_github_mutations_resolve_mixed_case_repo_to_canonical_name() -> None:
+    github = FakeGitHub({"code-alice": "alice"})
+    github.canonical_repos["acme/widget"] = "Acme/Widget"
+    created = github.create_issue("tok-alice", "acme/widget", "Title", "Body", [])
+
+    fetched = github.issue("tok-alice", "ACME/WIDGET", created["number"])
+    assigned = github.add_assignees(
+        "tok-alice", "ACME/WIDGET", created["number"], ["helperbot"]
+    )
+    comment = github.create_issue_comment(
+        "tok-alice", "ACME/WIDGET", created["number"], "Reply"
+    )
+
+    assert fetched["html_url"] == "https://github.test/Acme/Widget/issues/1"
+    assert assigned["assignees"] == [{"login": "helperbot"}]
+    assert comment["html_url"] == (
+        "https://github.test/Acme/Widget/issues/1#issuecomment-1"
+    )
 
 
 def test_real_github_comments_follows_last_page_for_newest_comments(

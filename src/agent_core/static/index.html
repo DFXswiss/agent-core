@@ -322,6 +322,11 @@
     }
 
     function expireAssignmentLoad(agent) {
+      const current = assignmentLoads.get(agent);
+      if (current) {
+        current.controller.abort();
+        assignmentLoads.delete(agent);
+      }
       assignmentResults.delete(agent);
       assignmentCompletedAt.delete(agent);
       assignmentInvalidations.set(agent, (assignmentInvalidations.get(agent) || 0) + 1);
@@ -997,6 +1002,10 @@
           document.getElementById("err").textContent = e.name === "AbortError"
             ? "Request did not complete — check the assignment list before submitting again"
             : String(e);
+          if (e.name === "AbortError") {
+            expireAssignmentLoad(form.dataset.agent);
+            await repaintAgents();
+          }
         } finally {
           clearTimeout(postTimeout);
           agentPostControllers.delete(postCtl);
@@ -1061,6 +1070,10 @@
           document.getElementById("err").textContent = e.name === "AbortError"
             ? "Request did not complete — check the assignment list before submitting again"
             : String(e);
+          if (e.name === "AbortError") {
+            expireAssignmentLoad(form.dataset.agent);
+            await repaintAgents();
+          }
         } finally {
           clearTimeout(postTimeout);
           agentPostControllers.delete(postCtl);

@@ -146,7 +146,7 @@ The hub is a relay only. It does not run tmux, does not start processes, and doe
 ### Ownership and visibility
 
 - A session is **visible** to a viewer when the replica's `github_login` is in `hub.visible(viewer)` (self plus teammates from `teams.yaml`).
-- `can_control(login, origin_device_id)` is true only when a non-revoked device row exists and either its `github_login` equals `login` or `login` owns that agent login. Other teammates may watch but may not control.
+- `can_control(login, origin_device_id)` is true only when the session's origin device row exists, is not revoked, and its `github_login` either equals the actor login or is an agent login that actor owns. Other teammates may watch but may not control.
 - Unknown or non-visible session ids return **404** (no existence leak across teams).
 
 ### Session state fields

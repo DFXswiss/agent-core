@@ -326,6 +326,9 @@ def test_index_agent_render_preserves_forms_and_handles_fetch_lifecycle() -> Non
     assignment_abort_fn = html.split("function abortAssignmentLoads()", 1)[1].split(
         "function expireAssignmentLoad", 1
     )[0]
+    assignment_expire_fn = html.split("function expireAssignmentLoad", 1)[1].split(
+        "function assignmentOwnerSetKey", 1
+    )[0]
     assignment_load_fn = html.split("function loadAssignmentsForAgent", 1)[1].split(
         "async function renderAgents", 1
     )[0]
@@ -356,6 +359,9 @@ def test_index_agent_render_preserves_forms_and_handles_fetch_lifecycle() -> Non
     assert "assignmentLoads.forEach(load => load.controller.abort())" in assignment_abort_fn
     assert "assignmentLoads.clear()" in assignment_abort_fn
     assert "++agentRenderGen" in assignment_abort_fn
+    assert "const current = assignmentLoads.get(agent)" in assignment_expire_fn
+    assert "current.controller.abort()" in assignment_expire_fn
+    assert "assignmentLoads.delete(agent)" in assignment_expire_fn
     assert html.count("abortAssignmentLoads();") == 3
     assert "assignmentOwnerSetKey(user.owned_agents || [])" in html
     assert "assignmentOwnersKey !== nextOwnerKey" in html
@@ -371,7 +377,7 @@ def test_index_agent_render_preserves_forms_and_handles_fetch_lifecycle() -> Non
     assert submit_handler.count("setFormBusy(form, true)") == 2
     assert submit_handler.count("setFormBusy(form, false)") >= 2
     assert submit_handler.count("finally") >= 2
-    assert submit_handler.count("await repaintAgents()") == 2
+    assert submit_handler.count("await repaintAgents()") == 4
     for handler in (assign_handler, reply_handler):
         assert "const sessionEpoch = agentSessionEpoch" in handler
         assert "const generation = agentRenderGen" not in handler
@@ -394,6 +400,10 @@ def test_index_agent_render_preserves_forms_and_handles_fetch_lifecycle() -> Non
         assert "clearTimeout(postTimeout)" in handler
         assert "agentPostControllers.delete(postCtl)" in handler
         assert "Request did not complete — check the assignment list before submitting again" in handler
+        timeout_block = handler.split("catch (e)", 1)[1].split("finally", 1)[0]
+        assert 'if (e.name === "AbortError")' in timeout_block
+        assert "expireAssignmentLoad(form.dataset.agent)" in timeout_block
+        assert "await repaintAgents()" in timeout_block
     assert "const failure = await responseJson(res)" in reply_handler
 
 

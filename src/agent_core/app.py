@@ -50,6 +50,8 @@ MAX_IN_VALUES = 16
 QUERY_ROW_CAP = 500
 TIMELINE_ROW_CAP = 5000
 ISSUE_CACHE_SECONDS = 60
+ISSUE_CACHE_MAX_ENTRIES = 500
+ASSIGNMENT_ENRICHMENT_LIMIT = 50
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 HUB_AUTHORED_ACTIVITY_TYPES = frozenset({"assignment.created", "assignment.reply"})
 _MISSING = object()
@@ -560,6 +562,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         wanted = agent.strip().lower()
         if not hub.roster.is_agent(wanted) or wanted not in hub.visible(login):
             raise HTTPException(status_code=404, detail="unknown agent")
+        _prune_issue_cache(hub)
         token = _optional_github_token(hub, login)
         rows = hub.store.query(
             "SELECT * FROM row_replica WHERE table_name = 'activity' "
@@ -584,11 +587,18 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
             ):
                 continue
             item = dict(inner)
+            item["enriched"] = False
             repo = item.get("repo")
             number = item.get("number")
-            if isinstance(repo, str) and isinstance(number, int) and not isinstance(number, bool):
+            if (
+                len(assignments) < ASSIGNMENT_ENRICHMENT_LIMIT
+                and isinstance(repo, str)
+                and isinstance(number, int)
+                and not isinstance(number, bool)
+            ):
                 item.update(_assignment_enrichment(hub, login, token, repo, number))
             assignments.append(item)
+        _prune_issue_cache(hub)
         return {"agent": wanted, "assignments": assignments}
 
     @app.post("/api/assignments/{owner}/{name}/{number}/comments")
@@ -1140,7 +1150,7 @@ def _assignment_enrichment(
     hub: Hub, viewer: str, token: str, repo: str, number: int
 ) -> dict[str, Any]:
     if not token:
-        return {}
+        return {"enriched": False}
     key = (viewer, repo, number)
     cached = hub.issue_cache.get(key)
     if cached is not None and cached[0] > time.monotonic():
@@ -1149,7 +1159,7 @@ def _assignment_enrichment(
         issue_row = hub.github.issue(token, repo, number)
         raw_comments = hub.github.issue_comments(token, repo, number)
     except GitHubError:
-        return {}
+        return {"enriched": False}
     comments: list[dict[str, Any]] = []
     for raw in raw_comments:
         if not isinstance(raw, dict):
@@ -1169,12 +1179,25 @@ def _assignment_enrichment(
         )
     comments.sort(key=lambda row: row["created_at"], reverse=True)
     result = {
+        "enriched": True,
         "state": issue_row.get("state") if isinstance(issue_row.get("state"), str) else "",
         "assignees": sorted(_issue_assignees(issue_row)),
         "comments": comments[:20],
     }
     hub.issue_cache[key] = (time.monotonic() + ISSUE_CACHE_SECONDS, result)
     return dict(result)
+
+
+def _prune_issue_cache(hub: Hub) -> None:
+    now = time.monotonic()
+    for key, (expires_at, _result) in list(hub.issue_cache.items()):
+        if expires_at <= now:
+            hub.issue_cache.pop(key, None)
+    overflow = len(hub.issue_cache) - ISSUE_CACHE_MAX_ENTRIES
+    if overflow > 0:
+        oldest = sorted(hub.issue_cache, key=lambda key: hub.issue_cache[key][0])[:overflow]
+        for key in oldest:
+            hub.issue_cache.pop(key, None)
 
 
 def _activity_inner(payload: dict[str, Any]) -> dict[str, Any]:
