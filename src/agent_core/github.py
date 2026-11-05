@@ -232,6 +232,9 @@ class RealGitHub(GitHub):
                     "X-GitHub-Api-Version": "2022-11-28",
                 },
                 timeout=20.0,
+                # GitHub answers a renamed or transferred repository with 301 (GET) or
+                # 307 (writes); httpx drops Authorization if a redirect leaves the host.
+                follow_redirects=True,
             )
         except httpx.HTTPError as exc:
             raise GitHubError(f"GitHub request failed: {type(exc).__name__}") from exc

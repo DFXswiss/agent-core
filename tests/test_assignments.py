@@ -882,7 +882,25 @@ def test_assignment_loads_have_a_deadline_and_keep_forms_visible() -> None:
     assert "assignmentLoads.delete(agent);" in html
     assert "assignmentResults.delete(agent);" in html
     assert "function clearError()" in html
-    assert html.count("clearError();") >= 3
+    assert html.count("clearError();") == 1
+
+
+def test_action_errors_survive_the_state_poll() -> None:
+    html = (
+        Path(__file__).resolve().parents[1] / "src" / "agent_core" / "static" / "index.html"
+    ).read_text(encoding="utf-8")
+    submit = html[html.index('document.addEventListener("submit"'):]
+    submit = submit[: submit.index("\n    });")]
+    assert 'getElementById("err")' not in submit
+    assert 'getElementById("action-err")' in submit
+    assert "clearError();" not in submit
+    assert submit.count("clearActionError();") == 2
+    poll = html[html.index('jsonGet("/api/state"'):]
+    poll = poll[: poll.index("return p;")]
+    assert "clearActionError" not in poll
+    assert '<p id="action-err" hidden></p>' in html
+    reset = html[html.index("function clearHubTables()"):]
+    assert "clearActionError();" in reset[: reset.index("\n    }")]
 
 
 def test_assignment_and_timeline_links_use_safe_href() -> None:
@@ -901,3 +919,42 @@ def test_assignment_and_timeline_links_use_safe_href() -> None:
     assert "safeHref(inner.url)" in session
     assert 'href="${esc(a.url)}"' not in index
     assert 'href="${esc(inner.url)}"' not in session
+
+
+@pytest.mark.parametrize(
+    ("status", "method", "call"),
+    [
+        (301, "GET", lambda gh: gh.issue("tok-alice", "Acme/Old", 7)),
+        (
+            307,
+            "POST",
+            lambda gh: gh.create_issue_comment("tok-alice", "Acme/Old", 7, "hello"),
+        ),
+    ],
+)
+def test_real_github_follows_rename_redirects_with_the_token(
+    cfg, monkeypatch: pytest.MonkeyPatch, status: int, method: str, call
+) -> None:
+    seen: list[tuple[str, str, str | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path, request.headers.get("Authorization")))
+        if request.url.path.startswith("/repos/Acme/Old/"):
+            new_url = str(request.url).replace("/repos/Acme/Old/", "/repositories/42/")
+            return httpx.Response(status, headers={"Location": new_url})
+        return httpx.Response(
+            201 if method == "POST" else 200,
+            json={"number": 7, "id": 1, "body": "hello", "html_url": "https://github.com/Acme/New/issues/7"},
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    def request(verb: str, url: str, **kwargs: object) -> httpx.Response:
+        return client.request(verb, url, **kwargs)
+
+    monkeypatch.setattr(httpx, "request", request)
+    result = call(RealGitHub(cfg))
+    assert result["number"] == 7
+    assert [entry[0] for entry in seen] == [method, method]
+    assert seen[1][1].startswith("/repositories/42/")
+    assert seen[1][2] == "Bearer tok-alice"

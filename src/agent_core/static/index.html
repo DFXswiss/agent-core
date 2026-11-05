@@ -104,7 +104,7 @@
     .failed { color: var(--bad); font-weight: 600; }
     .draft { color: var(--warn); font-weight: 600; }
     .open { color: var(--ok); font-weight: 600; }
-    #err { color: var(--bad); }
+    #err, #action-err { color: var(--bad); }
     .hidden { display: none; }
     input, select, textarea { padding: 6px 8px; border: 1px solid var(--input-border); border-radius: 4px; font: inherit; background: var(--input-bg); color: var(--input-fg); }
     label { display: block; margin: 8px 0; }
@@ -149,6 +149,7 @@
   <p id="err" hidden></p>
 
   <div id="signed-in" class="hidden">
+    <p id="action-err" hidden></p>
     <div class="bar">
       <span>Signed in as <b id="who"></b></span>
       <span>Teams: <span id="team-list">—</span></span>
@@ -329,6 +330,14 @@
       err.textContent = "";
     }
 
+    // Assignment and reply errors live in their own element: a successful state poll
+    // clears only #err, so an action error stays until the next action succeeds.
+    function clearActionError() {
+      const err = document.getElementById("action-err");
+      err.hidden = true;
+      err.textContent = "";
+    }
+
     function expireAssignmentLoad(agent) {
       const current = assignmentLoads.get(agent);
       if (current) {
@@ -347,6 +356,7 @@
     function clearHubTables() {
       ++agentRenderGen;
       ++agentSessionEpoch;
+      clearActionError();
       agentPostControllers.forEach(ctl => ctl.abort());
       agentPostControllers.clear();
       agentFormsInFlight.clear();
@@ -1029,19 +1039,19 @@
               partialAssignmentLocks.set(formKey, failure.url);
               applyPartialAssignmentLock(form, formKey, failure.url);
             } else {
-              document.getElementById("err").hidden = false;
-              document.getElementById("err").textContent = failure.detail || "assignment failed";
+              document.getElementById("action-err").hidden = false;
+              document.getElementById("action-err").textContent = failure.detail || "assignment failed";
             }
             return;
           }
           if (sessionEpoch !== agentSessionEpoch || login !== window.__login) return;
           form.reset();
-          clearError();
+          clearActionError();
           succeeded = true;
         } catch (e) {
           if (sessionEpoch !== agentSessionEpoch || login !== window.__login) return;
-          document.getElementById("err").hidden = false;
-          document.getElementById("err").textContent = e.name === "AbortError"
+          document.getElementById("action-err").hidden = false;
+          document.getElementById("action-err").textContent = e.name === "AbortError"
             ? "Request did not complete — check the assignment list before submitting again"
             : String(e);
           if (e.name === "AbortError") {
@@ -1099,18 +1109,18 @@
           if (!res.ok) {
             const failure = await responseJson(res);
             if (sessionEpoch !== agentSessionEpoch || login !== window.__login) return;
-            document.getElementById("err").hidden = false;
-            document.getElementById("err").textContent = failure.detail || "reply failed";
+            document.getElementById("action-err").hidden = false;
+            document.getElementById("action-err").textContent = failure.detail || "reply failed";
             return;
           }
           if (sessionEpoch !== agentSessionEpoch || login !== window.__login) return;
           form.reset();
-          clearError();
+          clearActionError();
           succeeded = true;
         } catch (e) {
           if (sessionEpoch !== agentSessionEpoch || login !== window.__login) return;
-          document.getElementById("err").hidden = false;
-          document.getElementById("err").textContent = e.name === "AbortError"
+          document.getElementById("action-err").hidden = false;
+          document.getElementById("action-err").textContent = e.name === "AbortError"
             ? "Request did not complete — check the assignment list before submitting again"
             : String(e);
           if (e.name === "AbortError") {
