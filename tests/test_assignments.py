@@ -341,13 +341,12 @@ def test_assignment_retries_missing_assignee_then_returns_issue_url(agent_hub: T
         "create_issue",
         "issue",
         "add_assignees",
-        "issue",
     ]
 
 
-def test_assignment_accepts_201_add_and_verify_get_decides(
-    agent_hub: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def _assignee_add_scenario(
+    agent_hub: TestClient, monkeypatch: pytest.MonkeyPatch, add_assignees: list[dict[str, str]]
+) -> tuple[object, list[tuple[str, str]]]:
     sign_in(agent_hub, "code-alice")
     hub = agent_hub.app.state.hub
     hub.github = RealGitHub(hub.cfg)
@@ -364,8 +363,7 @@ def test_assignment_accepts_201_add_and_verify_get_decides(
                 },
             ),
             _Response(200, {"number": 1, "assignees": []}),
-            _Response(201, {"number": 1, "assignees": [{"login": "helperbot"}]}),
-            _Response(200, {"number": 1, "assignees": []}),
+            _Response(201, {"number": 1, "assignees": add_assignees}),
         ]
     )
 
@@ -374,12 +372,31 @@ def test_assignment_accepts_201_add_and_verify_get_decides(
         return next(responses)
 
     monkeypatch.setattr(httpx, "request", request)
-    response = agent_hub.post("/api/assignments", json=ASSIGNMENT)
+    return agent_hub.post("/api/assignments", json=ASSIGNMENT), calls
+
+
+def test_assignment_accepts_201_add_and_the_add_response_decides(
+    agent_hub: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    response, calls = _assignee_add_scenario(agent_hub, monkeypatch, [{"login": "helperbot"}])
+    assert response.status_code == 201, response.text
+    assert [method for method, _url in calls] == ["POST", "GET", "POST"]
+    assert calls[2][1].endswith("/repos/Acme/Widget/issues/1/assignees")
+    assert response.json()["number"] == 1
+    state = agent_hub.get("/api/state").json()
+    created = [row for row in state["activity"] if row.get("type") == "assignment.created"]
+    assert len(created) == 1
+    assert created[0]["payload"]["number"] == 1
+
+
+def test_assignment_add_response_without_agent_returns_issue_url(
+    agent_hub: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    response, calls = _assignee_add_scenario(agent_hub, monkeypatch, [])
     assert response.status_code == 502
     assert response.json()["url"] == "https://github.test/Acme/Widget/issues/1"
     assert response.json()["number"] == 1
-    assert [method for method, _url in calls] == ["POST", "GET", "POST", "GET"]
-    assert calls[2][1].endswith("/repos/Acme/Widget/issues/1/assignees")
+    assert [method for method, _url in calls] == ["POST", "GET", "POST"]
 
 
 def test_assignment_transport_errors_are_bounded_and_preserve_created_issue(

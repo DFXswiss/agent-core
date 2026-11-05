@@ -185,3 +185,21 @@ def test_invalid_agents_fail_closed(tmp_path: Path, teams: dict, agents: dict, m
     path.write_text(yaml.safe_dump({"teams": teams, "agents": agents}), encoding="utf-8")
     with pytest.raises(TeamsError, match=message):
         load_roster(path)
+
+
+def test_owned_agents_are_sorted_by_login_not_declaration(tmp_path: Path) -> None:
+    path = tmp_path / "teams.yaml"
+    path.write_text(
+        "teams:\n"
+        "  dfx:\n"
+        "    members: [alice, zetabot, alphabot]\n"
+        "agents:\n"
+        "  zetabot:\n"
+        "    owners: [alice]\n"
+        "  alphabot:\n"
+        "    owners: [alice]\n",
+        encoding="utf-8",
+    )
+    roster = load_roster(path)
+    assert list(roster.agents) == ["zetabot", "alphabot"]
+    assert roster.owned_agents("Alice") == ["alphabot", "zetabot"]

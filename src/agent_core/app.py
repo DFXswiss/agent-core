@@ -522,8 +522,9 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
             repo = canonical_repo
             current = await asyncio.to_thread(hub.github.issue, token, repo, number)
             if agent not in _issue_assignees(current):
-                await asyncio.to_thread(hub.github.add_assignees, token, repo, number, [agent])
-                current = await asyncio.to_thread(hub.github.issue, token, repo, number)
+                # The assignees endpoint returns the updated issue; reuse it instead of a
+                # second GET, so a failed read never drops a mandate GitHub already holds.
+                current = await asyncio.to_thread(hub.github.add_assignees, token, repo, number, [agent])
             if agent not in _issue_assignees(current):
                 return JSONResponse(
                     {
