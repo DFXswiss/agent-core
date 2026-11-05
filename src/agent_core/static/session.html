@@ -74,7 +74,7 @@
         <td>${esc(row.at)}</td><td>${esc(row.table)}</td><td>${describe(row)}</td>
       </tr>`).join("") || "<tr><td colspan='3'>No timeline rows.</td></tr>";
       document.getElementById("notice").textContent = data.truncated
-        ? "Showing the oldest 5,000 rows; this timeline is truncated."
+        ? "Showing the newest 5,000 rows (oldest first)"
         : `${rows.length} rows, oldest first.`;
     }
     load().catch(error => { document.getElementById("notice").textContent = String(error); });

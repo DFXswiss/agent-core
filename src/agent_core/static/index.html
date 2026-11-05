@@ -166,7 +166,7 @@
       <div class="kpi"><span>Open tasks</span><b id="k-tasks">–</b></div>
       <div class="kpi"><span>Working agents</span><b id="k-agents">–</b></div>
       <div class="kpi"><span>Open pings</span><b id="k-pings">–</b></div>
-      <div class="kpi"><span>Usage</span><b id="k-usage">–</b></div>
+      <div class="kpi"><span>Total tokens (input + output + cache read + cache create)</span><b id="k-usage">–</b></div>
     </div>
     <h2>Pull requests</h2>
     <p class="sub" id="prs-sub">Open PRs authored or assigned to people you can see.</p>
@@ -274,10 +274,12 @@
     let prsGen = 0;
     let usageInflight = null;
     let usageGen = 0;
+    let usageLastStartedAt = 0;
     let agentRenderGen = 0;
     let agentSessionEpoch = 0;
     let latestAgentState = {};
     const assignmentControllers = new Set();
+    const agentPostControllers = new Set();
     const agentFormsInFlight = new Set();
     const partialAssignmentLocks = new Map();
 
@@ -302,6 +304,10 @@
     function clearHubTables() {
       ++agentRenderGen;
       ++agentSessionEpoch;
+      agentPostControllers.forEach(ctl => ctl.abort());
+      agentPostControllers.clear();
+      agentFormsInFlight.clear();
+      usageLastStartedAt = 0;
       latestAgentState = {};
       window.__ownedAgents = [];
       partialAssignmentLocks.clear();
@@ -460,7 +466,7 @@
 
     function agentFormKey(form) {
       if (form.classList.contains("assign-form")) return JSON.stringify(["assign", form.dataset.agent || ""]);
-      return JSON.stringify(["reply", form.dataset.repo || "", form.dataset.number || ""]);
+      return JSON.stringify(["reply", form.dataset.agent || "", form.dataset.repo || "", form.dataset.number || ""]);
     }
 
     function captureAgentDrafts() {
@@ -471,6 +477,33 @@
         drafts.set(agentFormKey(form), values);
       });
       return drafts;
+    }
+
+    function captureAgentFocus() {
+      const field = document.activeElement;
+      const form = field && field.closest ? field.closest("#agents-list .assign-form, #agents-list .reply-form") : null;
+      if (!form || !field.name) return null;
+      return {
+        formKey: agentFormKey(form),
+        name: field.name,
+        selectionStart: typeof field.selectionStart === "number" ? field.selectionStart : null,
+        selectionEnd: typeof field.selectionEnd === "number" ? field.selectionEnd : null,
+        selectionDirection: field.selectionDirection || "none",
+      };
+    }
+
+    function restoreAgentFocus(focus) {
+      if (!focus) return;
+      const form = Array.from(document.querySelectorAll("#agents-list .assign-form, #agents-list .reply-form"))
+        .find(candidate => agentFormKey(candidate) === focus.formKey);
+      if (!form) return;
+      const field = Array.from(form.querySelectorAll("input[name], textarea[name]"))
+        .find(candidate => candidate.name === focus.name);
+      if (!field) return;
+      field.focus({ preventScroll: true });
+      if (typeof field.setSelectionRange === "function" && focus.selectionStart !== null && focus.selectionEnd !== null) {
+        field.setSelectionRange(focus.selectionStart, focus.selectionEnd, focus.selectionDirection);
+      }
     }
 
     function setFormBusy(form, busy) {
@@ -521,6 +554,8 @@
     }
 
     async function renderAgents(agents, state) {
+      assignmentControllers.forEach(ctl => ctl.abort());
+      assignmentControllers.clear();
       const generation = ++agentRenderGen;
       latestAgentState = state || {};
       const section = document.getElementById("agents-section");
@@ -553,6 +588,7 @@
       }));
       if (generation !== agentRenderGen) return;
       const drafts = captureAgentDrafts();
+      const focus = captureAgentFocus();
       list.innerHTML = owned.map((agent, index) => {
         const sessions = (state.session || []).filter(s => s._github_login === agent).map(s =>
           `<li><a href="/sessions/${encodeURIComponent(s.id)}">${esc(s.id)}</a> — ${esc(s.status)}</li>`
@@ -565,7 +601,7 @@
           return `<div class="assignment">
             <a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.repo)}#${esc(a.number)} — ${esc(a.title)}</a>
             <span>${esc(a.state)}</span><ul class="comments">${comments}</ul>
-            <form class="reply-form" data-repo="${esc(a.repo)}" data-number="${esc(a.number)}">
+            <form class="reply-form" data-agent="${esc(agent)}" data-repo="${esc(a.repo)}" data-number="${esc(a.number)}">
               <input name="body" required maxlength="60000" placeholder="Reply as yourself"><button type="submit">Reply</button>
             </form>
           </div>`;
@@ -580,6 +616,7 @@
           </form><h4>Assignments</h4>${assignments}</div>`;
       }).join("");
       restoreAgentFormState(drafts);
+      restoreAgentFocus(focus);
     }
 
     function repaintAgents() {
@@ -722,7 +759,6 @@
       }
       kickState();
       kickPrs();
-      kickUsage();
     }
 
     function kickState() {
@@ -749,6 +785,7 @@
         fill("pings", data.pings || [], ["from_login", "to_login", "kind", "task_id", "acked_at", "_ack"]);
         fill("devices", (data.devices || []).filter(d => !d.revoked_at), ["github_login", "name", "id", "created_at", "confirmed_by"]);
         renderAgents(window.__ownedAgents || [], data);
+        kickUsage();
         stateInflight = null;
       }).catch(e => {
         if (!stateInflight || stateInflight.gen !== gen) return;
@@ -762,6 +799,9 @@
 
     function kickUsage() {
       if (usageInflight) return usageInflight.p;
+      const now = Date.now();
+      if (now - usageLastStartedAt < 15000) return null;
+      usageLastStartedAt = now;
       const usageCtl = new AbortController();
       const gen = ++usageGen;
       const p = jsonGet("/api/usage", usageCtl, 15000);
@@ -771,7 +811,9 @@
         fillLaneUsage(data.lanes || []);
         fillAccountUsage(data.accounts || []);
         fillUsage(data.grok || []);
-        const tokenTotal = (data.lanes || []).reduce((sum, row) => sum + (row.input_tokens || 0) + (row.output_tokens || 0), 0);
+        const tokenTotal = (data.lanes || []).reduce((sum, row) => sum +
+          (row.input_tokens || 0) + (row.output_tokens || 0) +
+          (row.cache_read_input_tokens || 0) + (row.cache_creation_input_tokens || 0), 0);
         document.getElementById("k-usage").textContent = tokenTotal;
         usageInflight = null;
       }).catch(e => {
@@ -861,10 +903,13 @@
         const fd = new FormData(form);
         const payload = { agent: form.dataset.agent, repo: fd.get("repo"), title: fd.get("title"), body: fd.get("body") };
         let succeeded = false;
+        const postCtl = new AbortController();
+        const postTimeout = setTimeout(() => postCtl.abort(), 30000);
+        agentPostControllers.add(postCtl);
         agentFormsInFlight.add(formKey);
         setFormBusy(form, true);
         try {
-          const res = await fetch("/api/assignments", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+          const res = await fetch("/api/assignments", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal: postCtl.signal });
           if (!res.ok) {
             const failure = await responseJson(res);
             if (sessionEpoch !== agentSessionEpoch || login !== window.__login) return;
@@ -883,10 +928,14 @@
         } catch (e) {
           if (sessionEpoch !== agentSessionEpoch || login !== window.__login) return;
           document.getElementById("err").hidden = false;
-          document.getElementById("err").textContent = String(e);
+          document.getElementById("err").textContent = e.name === "AbortError"
+            ? "Request did not complete — check the assignment list before submitting again"
+            : String(e);
         } finally {
-          agentFormsInFlight.delete(formKey);
+          clearTimeout(postTimeout);
+          agentPostControllers.delete(postCtl);
           if (sessionEpoch === agentSessionEpoch && login === window.__login) {
+            agentFormsInFlight.delete(formKey);
             setFormBusy(form, false);
             document.querySelectorAll("#agents-list .assign-form").forEach(current => {
               if (agentFormKey(current) === formKey) setFormBusy(current, false);
@@ -922,10 +971,13 @@
         const parts = (form.dataset.repo || "").split("/");
         const url = "/api/assignments/" + encodeURIComponent(parts[0]) + "/" + encodeURIComponent(parts[1]) + "/" + encodeURIComponent(form.dataset.number) + "/comments";
         let succeeded = false;
+        const postCtl = new AbortController();
+        const postTimeout = setTimeout(() => postCtl.abort(), 30000);
+        agentPostControllers.add(postCtl);
         agentFormsInFlight.add(formKey);
         setFormBusy(form, true);
         try {
-          const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ body: fd.get("body") }) });
+          const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ body: fd.get("body") }), signal: postCtl.signal });
           if (!res.ok) {
             const failure = await responseJson(res);
             if (sessionEpoch !== agentSessionEpoch || login !== window.__login) return;
@@ -939,10 +991,14 @@
         } catch (e) {
           if (sessionEpoch !== agentSessionEpoch || login !== window.__login) return;
           document.getElementById("err").hidden = false;
-          document.getElementById("err").textContent = String(e);
+          document.getElementById("err").textContent = e.name === "AbortError"
+            ? "Request did not complete — check the assignment list before submitting again"
+            : String(e);
         } finally {
-          agentFormsInFlight.delete(formKey);
+          clearTimeout(postTimeout);
+          agentPostControllers.delete(postCtl);
           if (sessionEpoch === agentSessionEpoch && login === window.__login) {
+            agentFormsInFlight.delete(formKey);
             setFormBusy(form, false);
             document.querySelectorAll("#agents-list .reply-form").forEach(current => {
               if (agentFormKey(current) === formKey) setFormBusy(current, false);
