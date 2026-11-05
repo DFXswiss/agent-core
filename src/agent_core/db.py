@@ -101,8 +101,16 @@ class Store:
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS request_reservation ("
             "actor TEXT, activity_type TEXT, request_id TEXT, status TEXT NOT NULL, "
-            "lease_until TEXT NOT NULL, PRIMARY KEY (actor, activity_type, request_id))"
+            "lease_until TEXT NOT NULL, owner TEXT NOT NULL DEFAULT '', "
+            "PRIMARY KEY (actor, activity_type, request_id))"
         )
+        columns = {
+            row[1] for row in self._conn.execute("PRAGMA table_info(request_reservation)")
+        }
+        if "owner" not in columns:
+            self._conn.execute(
+                "ALTER TABLE request_reservation ADD COLUMN owner TEXT NOT NULL DEFAULT ''"
+            )
 
     def close(self) -> None:
         with self._lock:
@@ -169,6 +177,7 @@ class Store:
         actor: str,
         activity_type: str,
         request_id: str,
+        owner: str,
         now: str,
         lease_until: str,
     ) -> str:
@@ -183,9 +192,9 @@ class Store:
                 if row is None:
                     self._conn.execute(
                         "INSERT INTO request_reservation "
-                        "(actor, activity_type, request_id, status, lease_until) "
-                        "VALUES (?, ?, ?, 'pending', ?)",
-                        (actor, activity_type, request_id, lease_until),
+                        "(actor, activity_type, request_id, status, lease_until, owner) "
+                        "VALUES (?, ?, ?, 'pending', ?, ?)",
+                        (actor, activity_type, request_id, lease_until, owner),
                     )
                     result = "reserved"
                 elif row["status"] == "done":
@@ -194,9 +203,9 @@ class Store:
                     result = "busy"
                 else:
                     self._conn.execute(
-                        "UPDATE request_reservation SET lease_until = ? "
+                        "UPDATE request_reservation SET lease_until = ?, owner = ? "
                         "WHERE actor = ? AND activity_type = ? AND request_id = ?",
-                        (lease_until, actor, activity_type, request_id),
+                        (lease_until, owner, actor, activity_type, request_id),
                     )
                     result = "reserved"
                 self._conn.commit()
@@ -205,19 +214,43 @@ class Store:
                 self._conn.rollback()
                 raise
 
-    def finish_request(self, actor: str, activity_type: str, request_id: str) -> None:
-        self.execute(
-            "UPDATE request_reservation SET status = 'done' "
-            "WHERE actor = ? AND activity_type = ? AND request_id = ?",
-            (actor, activity_type, request_id),
+    def renew_request(
+        self,
+        actor: str,
+        activity_type: str,
+        request_id: str,
+        owner: str,
+        now: str,
+        lease_until: str,
+    ) -> bool:
+        updated = self.execute(
+            "UPDATE request_reservation SET lease_until = ? "
+            "WHERE actor = ? AND activity_type = ? AND request_id = ? "
+            "AND status = 'pending' AND owner = ? AND lease_until > ?",
+            (lease_until, actor, activity_type, request_id, owner, now),
         )
+        return updated.rowcount == 1
 
-    def release_request(self, actor: str, activity_type: str, request_id: str) -> None:
-        self.execute(
-            "DELETE FROM request_reservation WHERE actor = ? AND activity_type = ? "
-            "AND request_id = ? AND status = 'pending'",
-            (actor, activity_type, request_id),
+    def finish_request(
+        self, actor: str, activity_type: str, request_id: str, owner: str
+    ) -> bool:
+        updated = self.execute(
+            "UPDATE request_reservation SET status = 'done' "
+            "WHERE actor = ? AND activity_type = ? AND request_id = ? "
+            "AND status = 'pending' AND owner = ?",
+            (actor, activity_type, request_id, owner),
         )
+        return updated.rowcount == 1
+
+    def release_request(
+        self, actor: str, activity_type: str, request_id: str, owner: str
+    ) -> bool:
+        deleted = self.execute(
+            "DELETE FROM request_reservation WHERE actor = ? AND activity_type = ? "
+            "AND request_id = ? AND status = 'pending' AND owner = ?",
+            (actor, activity_type, request_id, owner),
+        )
+        return deleted.rowcount == 1
 
     def record_web_event(
         self,

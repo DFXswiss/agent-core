@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 import agent_core.app as app_module
 from agent_core.db import dumps
-from agent_core.github import FakeGitHub, GitHubError, RealGitHub
+from agent_core.github import FakeGitHub, GitHubError, RealGitHub, valid_repository_name
 from tests.conftest import pair_device, sign_in
 from tests.test_agent_pair_control import _pair_as
 from tests.test_newest_first import _insert_replica
@@ -208,6 +208,14 @@ def test_assignment_create_request_id_replays_recorded_success(
     state = agent_hub.get("/api/state").json()
     activity = next(row for row in state["activity"] if row.get("type") == "assignment.created")
     assert activity["payload"]["request_id"] == REQUEST_ID
+    reservation = agent_hub.app.state.hub.store.query_one(
+        "SELECT owner, status FROM request_reservation WHERE request_id = ?",
+        (REQUEST_ID,),
+    )
+    assert reservation is not None
+    assert reservation["status"] == "done"
+    assert len(reservation["owner"]) == 32
+    assert set(reservation["owner"]) <= set("0123456789abcdef")
 
 
 def test_assignment_create_recovers_after_timeout_that_created_the_issue(
@@ -315,6 +323,7 @@ def test_assignment_request_is_busy_without_calling_github(
         "alice",
         "assignment.created",
         REQUEST_ID,
+        "existing-owner",
         "2026-11-05T10:00:00Z",
         "9999-01-01T00:00:00Z",
     ) == "reserved"
@@ -340,10 +349,13 @@ def test_completed_assignment_request_without_replay_row_is_conflict(
         "alice",
         "assignment.created",
         REQUEST_ID,
+        "existing-owner",
         "2026-11-05T10:00:00Z",
         "2026-11-05T10:02:00Z",
     ) == "reserved"
-    hub.store.finish_request("alice", "assignment.created", REQUEST_ID)
+    hub.store.finish_request(
+        "alice", "assignment.created", REQUEST_ID, "existing-owner"
+    )
     calls_before = list(hub.github.issue_calls)
 
     response = agent_hub.post(
@@ -366,6 +378,7 @@ def test_assignment_expired_request_reservation_is_taken_over(
         "alice",
         "assignment.created",
         REQUEST_ID,
+        "expired-owner",
         "2000-01-01T00:00:00Z",
         "2000-01-01T00:02:00Z",
     ) == "reserved"
@@ -382,6 +395,111 @@ def test_assignment_expired_request_reservation_is_taken_over(
     )
     assert reservation is not None
     assert reservation["status"] == "done"
+
+
+def test_assignment_takeover_stops_old_owner_before_github_write(
+    agent_hub: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    hub = agent_hub.app.state.hub
+    github: FakeGitHub = hub.github
+    original_recent = github.recent_issues_by_creator
+
+    def take_over_during_recovery(*args):
+        reservation = hub.store.query_one(
+            "SELECT owner FROM request_reservation WHERE request_id = ?", (REQUEST_ID,)
+        )
+        assert reservation is not None
+        assert reservation["owner"] != "new-owner"
+        hub.store.execute(
+            "UPDATE request_reservation SET lease_until = ? WHERE request_id = ?",
+            ("2000-01-01T00:00:00Z", REQUEST_ID),
+        )
+        assert hub.store.reserve_request(
+            "alice",
+            "assignment.created",
+            REQUEST_ID,
+            "new-owner",
+            "2026-11-05T10:00:00Z",
+            "9999-01-01T00:00:00Z",
+        ) == "reserved"
+        return original_recent(*args)
+
+    monkeypatch.setattr(github, "recent_issues_by_creator", take_over_during_recovery)
+    response = agent_hub.post(
+        "/api/assignments", json=dict(ASSIGNMENT, request_id=REQUEST_ID)
+    )
+
+    reservation = hub.store.query_one(
+        "SELECT owner, status FROM request_reservation WHERE request_id = ?",
+        (REQUEST_ID,),
+    )
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "request is still in progress; retry shortly"
+    }
+    assert reservation is not None
+    assert dict(reservation) == {"owner": "new-owner", "status": "pending"}
+    assert not [
+        call for call in github.issue_calls if call["operation"] == "create_issue"
+    ]
+
+
+def test_assignment_reply_renew_failure_stops_before_github_write(
+    agent_hub: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    assert agent_hub.post("/api/assignments", json=ASSIGNMENT).status_code == 201
+    hub = agent_hub.app.state.hub
+    github: FakeGitHub = hub.github
+    monkeypatch.setattr(hub.store, "renew_request", lambda *_args: False)
+
+    response = agent_hub.post(
+        "/api/assignments/Acme/Widget/1/comments",
+        json={"body": "A reply.", "request_id": REQUEST_ID},
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "request is still in progress; retry shortly"
+    }
+    assert not [
+        call
+        for call in github.issue_calls
+        if call["operation"] == "create_issue_comment"
+    ]
+
+
+def test_assignment_renews_again_before_add_assignees(
+    agent_hub: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    hub = agent_hub.app.state.hub
+    github: FakeGitHub = hub.github
+    github.omit_assignees_on_create = True
+    original_renew = hub.store.renew_request
+    renew_calls = 0
+
+    def lose_reservation_before_second_write(*args) -> bool:
+        nonlocal renew_calls
+        renew_calls += 1
+        if renew_calls == 2:
+            return False
+        return original_renew(*args)
+
+    monkeypatch.setattr(hub.store, "renew_request", lose_reservation_before_second_write)
+    response = agent_hub.post(
+        "/api/assignments", json=dict(ASSIGNMENT, request_id=REQUEST_ID)
+    )
+
+    assert response.status_code == 409
+    assert renew_calls == 2
+    assert len(
+        [call for call in github.issue_calls if call["operation"] == "create_issue"]
+    ) == 1
+    assert not [
+        call for call in github.issue_calls if call["operation"] == "add_assignees"
+    ]
 
 
 def test_assignment_reply_releases_reservation_after_prewrite_denial(
@@ -463,6 +581,40 @@ def test_assignment_create_validation_errors(
     assert response.json() == {"detail": detail}
 
 
+@pytest.mark.parametrize("repo", ["Acme/.", "Acme/..", "./x", "a/b/c"])
+def test_assignment_create_rejects_repository_dot_segments(
+    agent_hub: TestClient, repo: str
+) -> None:
+    sign_in(agent_hub, "code-alice")
+
+    response = agent_hub.post(
+        "/api/assignments", json=dict(ASSIGNMENT, repo=repo)
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "repo must be Owner/Name"}
+    assert not valid_repository_name(repo)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "/api/assignments/Acme/%2E/1/comments",
+        "/api/assignments/Acme/%2E%2E/1/comments",
+        "/api/assignments/%2E/x/1/comments",
+        "/api/assignments/a/b/c/1/comments",
+    ],
+)
+def test_assignment_reply_rejects_repository_dot_segments(
+    agent_hub: TestClient, url: str
+) -> None:
+    sign_in(agent_hub, "code-alice")
+
+    response = agent_hub.post(url, json={"body": "A reply."})
+
+    assert response.status_code == 404
+
+
 @pytest.mark.parametrize("body", ["", "x" * 60001])
 def test_assignment_reply_body_length_errors(
     agent_hub: TestClient, body: str
@@ -473,6 +625,30 @@ def test_assignment_reply_body_length_errors(
     )
     assert response.status_code == 400
     assert response.json() == {"detail": "body must be a string of length 1..60000"}
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda github: github.create_issue("token", "Acme/..", "title", "body", []),
+        lambda github: github.recent_issues_by_creator("token", "Acme/..", "alice"),
+        lambda github: github.repository("token", "Acme/.."),
+        lambda github: github.issue("token", "Acme/..", 1),
+        lambda github: github.add_assignees("token", "Acme/..", 1, ["helperbot"]),
+        lambda github: github.create_issue_comment("token", "Acme/..", 1, "body"),
+        lambda github: github.issue_comments("token", "Acme/..", 1),
+    ],
+)
+def test_real_github_rejects_invalid_repo_before_building_request_path(
+    cfg, monkeypatch: pytest.MonkeyPatch, call
+) -> None:
+    def unexpected_request(*_args, **_kwargs):
+        raise AssertionError("invalid repository reached HTTP transport")
+
+    monkeypatch.setattr(httpx, "request", unexpected_request)
+
+    with pytest.raises(GitHubError, match="invalid GitHub repository name"):
+        call(RealGitHub(cfg))
 
 
 @pytest.mark.parametrize(
@@ -873,6 +1049,40 @@ def test_assignment_list_returns_newest_20_of_130_fake_comments(agent_hub: TestC
     assert [comment["body"] for comment in comments] == [
         f"comment-{index:03d}" for index in range(129, 109, -1)
     ]
+
+
+def test_assignment_comment_body_cut_has_4000_character_boundary(
+    agent_hub: TestClient,
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    assert agent_hub.post("/api/assignments", json=ASSIGNMENT).status_code == 201
+    github: FakeGitHub = agent_hub.app.state.hub.github
+    github.comments[("Acme/Widget", 1)] = [
+        {
+            "html_url": "https://github.test/Acme/Widget/issues/1#issuecomment-1",
+            "user": {"login": "helperbot"},
+            "created_at": "2026-11-05T10:00:00Z",
+            "body": "a" * 4000,
+        },
+        {
+            "html_url": "https://github.test/Acme/Widget/issues/1#issuecomment-2",
+            "user": {"login": "helperbot"},
+            "created_at": "2026-11-05T10:01:00Z",
+            "body": "b" * 4001,
+        },
+    ]
+
+    response = agent_hub.get("/api/assignments", params={"agent": "helperbot"})
+
+    assert response.status_code == 200
+    comments = response.json()["assignments"][0]["comments"]
+    assert comments[0] == {
+        "author": "helperbot",
+        "created_at": "2026-11-05T10:01:00Z",
+        "body": "b" * 4000,
+        "url": "https://github.test/Acme/Widget/issues/1#issuecomment-2",
+    }
+    assert comments[1]["body"] == "a" * 4000
 
 
 def test_assignment_comments_with_equal_timestamps_keep_github_order_newest_first(

@@ -417,7 +417,7 @@ def test_index_agent_render_preserves_forms_and_handles_fetch_lifecycle() -> Non
         assert "delete form.dataset.requestId" not in timeout_block
         assert "expireAssignmentLoad(form.dataset.agent)" in timeout_block
         assert "await repaintAgents()" in timeout_block
-    assert "const failure = await responseJson(res," in reply_handler
+    assert "const failure = await responseJson(res);" in reply_handler
 
 
 def test_session_timeline_truncation_notice_matches_newest_rows() -> None:

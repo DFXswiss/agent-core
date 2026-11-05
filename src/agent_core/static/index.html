@@ -645,14 +645,18 @@
       });
     }
 
-    async function responseJson(res, onParsed) {
+    async function responseJson(res) {
       try {
-        const body = await res.json();
-        if (onParsed) onParsed();
-        return body;
+        return await res.json();
       } catch (e) {
         return {};
       }
+    }
+
+    function requestIdIsFinal(status, detail) {
+      if (status >= 200 && status < 300) return true;
+      if (status === 400 || status === 403 || status === 404) return true;
+      return status === 409 && detail === "sign in on the website again";
     }
 
     function loadAssignmentsForAgent(agent) {
@@ -1060,10 +1064,11 @@
         try {
           const res = await fetch("/api/assignments", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal: postCtl.signal });
           if (!res.ok) {
-            const failure = await responseJson(res, () => {
+            const failure = await responseJson(res);
+            if (requestIdIsFinal(res.status, failure.detail)) {
               delete form.dataset.requestId;
               clearRenderedRequestIds(formKey);
-            });
+            }
             if (sessionEpoch !== agentSessionEpoch || login !== window.__login) return;
             if (typeof failure.url === "string" && failure.url) {
               partialAssignmentLocks.set(formKey, failure.url);
@@ -1074,8 +1079,10 @@
             }
             return;
           }
-          delete form.dataset.requestId;
-          clearRenderedRequestIds(formKey);
+          if (requestIdIsFinal(res.status, "")) {
+            delete form.dataset.requestId;
+            clearRenderedRequestIds(formKey);
+          }
           if (sessionEpoch !== agentSessionEpoch || login !== window.__login) return;
           form.reset();
           clearActionError();
@@ -1140,17 +1147,20 @@
         try {
           const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ body: fd.get("body"), request_id: form.dataset.requestId }), signal: postCtl.signal });
           if (!res.ok) {
-            const failure = await responseJson(res, () => {
+            const failure = await responseJson(res);
+            if (requestIdIsFinal(res.status, failure.detail)) {
               delete form.dataset.requestId;
               clearRenderedRequestIds(formKey);
-            });
+            }
             if (sessionEpoch !== agentSessionEpoch || login !== window.__login) return;
             document.getElementById("action-err").hidden = false;
             document.getElementById("action-err").textContent = failure.detail || "reply failed";
             return;
           }
-          delete form.dataset.requestId;
-          clearRenderedRequestIds(formKey);
+          if (requestIdIsFinal(res.status, "")) {
+            delete form.dataset.requestId;
+            clearRenderedRequestIds(formKey);
+          }
           if (sessionEpoch !== agentSessionEpoch || login !== window.__login) return;
           form.reset();
           clearActionError();

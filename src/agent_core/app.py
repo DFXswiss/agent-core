@@ -19,7 +19,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from .config import Config
 from .db import Store, dumps, loads, row_dict, utcnow
-from .github import GitHub, GitHubError, RealGitHub
+from .github import GitHub, GitHubError, RealGitHub, valid_repository_name
 from .teams import Roster, load_roster, visible_logins
 from .tokens import TokenError, issue, parse
 
@@ -56,7 +56,6 @@ ISSUE_CACHE_MAX_ENTRIES = 500
 ASSIGNMENT_ENRICHMENT_LIMIT = 50
 REQUEST_LEASE_SECONDS = 120
 GITHUB_REAUTH_DETAIL = "sign in on the website again"
-REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 REQUEST_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 HUB_AUTHORED_ACTIVITY_TYPES = frozenset({"assignment.created", "assignment.reply"})
 _MISSING = object()
@@ -499,11 +498,12 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
         if not hub.roster.owns_agent(actor, agent):
             raise HTTPException(status_code=403, detail="not an owner of that agent")
         repo = _require_str(body, "repo")
-        if REPO_RE.fullmatch(repo) is None:
+        if not valid_repository_name(repo):
             raise HTTPException(status_code=400, detail="repo must be Owner/Name")
         title = _bounded_body_string(body, "title", 1, 256)
         issue_body = _bounded_body_string(body, "body", 1, 60000)
         request_id = _optional_request_id(body)
+        request_owner = uuid.uuid4().hex
         if request_id is not None:
             replay = _assignment_request_replay(hub, actor, "assignment.created", request_id)
             if replay is not None:
@@ -512,7 +512,12 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                     return JSONResponse(response, status_code=200)
             now, lease_until = _request_lease_times()
             reservation = hub.store.reserve_request(
-                actor, "assignment.created", request_id, now, lease_until
+                actor,
+                "assignment.created",
+                request_id,
+                request_owner,
+                now,
+                lease_until,
             )
             if reservation == "done":
                 replay = _assignment_request_replay(
@@ -555,6 +560,13 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                     None,
                 )
             if created is None:
+                _renew_request_or_conflict(
+                    hub,
+                    actor,
+                    "assignment.created",
+                    request_id,
+                    request_owner,
+                )
                 issue_write_started = True
                 created = await asyncio.to_thread(
                     hub.github.create_issue, token, repo, title, posted_body, [agent]
@@ -572,7 +584,7 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
             if canonical_repo is None:
                 repository = await asyncio.to_thread(hub.github.repository, token, repo)
                 full_name = repository.get("full_name")
-                if not isinstance(full_name, str) or REPO_RE.fullmatch(full_name) is None:
+                if not valid_repository_name(full_name):
                     raise GitHubError("GitHub repository lookup returned no canonical full_name")
                 canonical_repo = full_name
             repo = canonical_repo
@@ -580,6 +592,13 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
             if agent not in _issue_assignees(current):
                 # The assignees endpoint returns the updated issue; reuse it instead of a
                 # second GET, so a failed read never drops a mandate GitHub already holds.
+                _renew_request_or_conflict(
+                    hub,
+                    actor,
+                    "assignment.created",
+                    request_id,
+                    request_owner,
+                )
                 current = await asyncio.to_thread(hub.github.add_assignees, token, repo, number, [agent])
             if agent not in _issue_assignees(current):
                 return JSONResponse(
@@ -592,7 +611,9 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                 )
         except HTTPException:
             if request_id is not None and not issue_write_started:
-                hub.store.release_request(actor, "assignment.created", request_id)
+                hub.store.release_request(
+                    actor, "assignment.created", request_id, request_owner
+                )
             raise
         except GitHubError as exc:
             if exc.status_code == 401:
@@ -605,7 +626,9 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                 if request_id is not None and not issue_created and (
                     not issue_write_started or exc.status_code is not None
                 ):
-                    hub.store.release_request(actor, "assignment.created", request_id)
+                    hub.store.release_request(
+                        actor, "assignment.created", request_id, request_owner
+                    )
                 return JSONResponse(reauth_failure, status_code=409)
             if issue_created:
                 failure: dict[str, Any] = {"detail": _bounded_github_error(exc)}
@@ -620,7 +643,9 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
             if request_id is not None and (
                 not issue_write_started or exc.status_code is not None
             ):
-                hub.store.release_request(actor, "assignment.created", request_id)
+                hub.store.release_request(
+                    actor, "assignment.created", request_id, request_owner
+                )
             raise HTTPException(status_code=502, detail=_bounded_github_error(exc)) from exc
         if number is None:
             raise HTTPException(status_code=502, detail="GitHub issue creation returned no issue number")
@@ -644,7 +669,9 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
             event_payload["payload"]["request_id"] = request_id
         _record_web_event(hub, actor, "activity", "insert", activity_id, event_payload)
         if request_id is not None:
-            hub.store.finish_request(actor, "assignment.created", request_id)
+            hub.store.finish_request(
+                actor, "assignment.created", request_id, request_owner
+            )
         await hub.publish({"type": "events", "login": actor, "count": 1})
         return JSONResponse(
             {"repo": repo, "number": number, "url": url, "agent": agent, "actor": actor},
@@ -716,17 +743,23 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                 detail="not an owner of an agent assigned to this issue",
             )
         repo = f"{owner}/{name}"
-        if REPO_RE.fullmatch(repo) is None or number < 1:
+        if not valid_repository_name(repo) or number < 1:
             raise HTTPException(status_code=404, detail="unknown issue")
         comment_body = _bounded_body_string(body, "body", 1, 60000)
         request_id = _optional_request_id(body)
+        request_owner = uuid.uuid4().hex
         if request_id is not None:
             replay = _assignment_request_replay(hub, actor, "assignment.reply", request_id)
             if replay is not None and isinstance(replay.get("url"), str):
                 return JSONResponse({"url": replay["url"]}, status_code=200)
             now, lease_until = _request_lease_times()
             reservation = hub.store.reserve_request(
-                actor, "assignment.reply", request_id, now, lease_until
+                actor,
+                "assignment.reply",
+                request_id,
+                request_owner,
+                now,
+                lease_until,
             )
             if reservation == "done":
                 replay = _assignment_request_replay(
@@ -781,24 +814,37 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
                     None,
                 )
             if comment is None:
+                _renew_request_or_conflict(
+                    hub,
+                    actor,
+                    "assignment.reply",
+                    request_id,
+                    request_owner,
+                )
                 comment_write_started = True
                 comment = await asyncio.to_thread(
                     hub.github.create_issue_comment, token, repo, number, posted_body
                 )
         except HTTPException:
             if request_id is not None:
-                hub.store.release_request(actor, "assignment.reply", request_id)
+                hub.store.release_request(
+                    actor, "assignment.reply", request_id, request_owner
+                )
             raise
         except GitHubError as exc:
             if exc.status_code == 401:
                 _forget_github_token(hub, actor, token)
                 if request_id is not None:
-                    hub.store.release_request(actor, "assignment.reply", request_id)
+                    hub.store.release_request(
+                        actor, "assignment.reply", request_id, request_owner
+                    )
                 raise HTTPException(status_code=409, detail=GITHUB_REAUTH_DETAIL) from exc
             if request_id is not None and (
                 not comment_write_started or exc.status_code is not None
             ):
-                hub.store.release_request(actor, "assignment.reply", request_id)
+                hub.store.release_request(
+                    actor, "assignment.reply", request_id, request_owner
+                )
             raise HTTPException(status_code=502, detail=_bounded_github_error(exc)) from exc
         url = comment.get("html_url")
         if not isinstance(url, str) or not url:
@@ -824,7 +870,9 @@ def create_app(cfg: Config, github: GitHub | None = None, store: Store | None = 
             event_payload["payload"]["request_id"] = request_id
         _record_web_event(hub, actor, "activity", "insert", activity_id, event_payload)
         if request_id is not None:
-            hub.store.finish_request(actor, "assignment.reply", request_id)
+            hub.store.finish_request(
+                actor, "assignment.reply", request_id, request_owner
+            )
         hub.issue_cache.pop((actor, repo, number), None)
         hub.issue_cache.pop((actor, path_repo, path_number), None)
         await hub.publish({"type": "events", "login": actor, "count": 1})
@@ -1288,6 +1336,26 @@ def _request_lease_times() -> tuple[str, str]:
     )
 
 
+def _renew_request_or_conflict(
+    hub: Hub,
+    actor: str,
+    activity_type: str,
+    request_id: str | None,
+    owner: str,
+) -> None:
+    if request_id is None:
+        return
+    now, lease_until = _request_lease_times()
+    if hub.store.renew_request(
+        actor, activity_type, request_id, owner, now, lease_until
+    ):
+        return
+    raise HTTPException(
+        status_code=409,
+        detail="request is still in progress; retry shortly",
+    )
+
+
 def _request_marker(request_id: str) -> str:
     return f"<!-- agent-core-request:{request_id} -->"
 
@@ -1353,7 +1421,7 @@ def _issue_repository_name(issue_row: dict[str, Any]) -> str | None:
     if match is None:
         return None
     repo = f"{match.group(1)}/{match.group(2)}"
-    return repo if REPO_RE.fullmatch(repo) is not None else None
+    return repo if valid_repository_name(repo) else None
 
 
 def _stored_github_issue_url(repo: str, number: int, candidate: str = "") -> str:
@@ -1512,7 +1580,7 @@ def _usage_response(hub: Hub, login: str) -> dict[str, Any]:
                     "cache_read_input_tokens": 0,
                     "cache_creation_input_tokens": 0,
                     "last_at": at,
-                    "_changed_at": row["updated_at"],
+                    "_changed_key": (row["updated_at"], row["row_id"]),
                 }
                 lane_groups[key] = item
             item["runs"] += 1
@@ -1525,8 +1593,9 @@ def _usage_response(hub: Hub, login: str) -> dict[str, Any]:
                 item[field] += _int_usage(usage.get(field))
             if at > item["last_at"]:
                 item["last_at"] = at
-            if row["updated_at"] > item["_changed_at"]:
-                item["_changed_at"] = row["updated_at"]
+            changed_key = (row["updated_at"], row["row_id"])
+            if changed_key > item["_changed_key"]:
+                item["_changed_key"] = changed_key
         if activity_type != "usage.snapshot":
             continue
         vendor = inner.get("vendor") or inner.get("provider") or ""
@@ -1549,29 +1618,35 @@ def _usage_response(hub: Hub, login: str) -> dict[str, Any]:
             "limit_usd": inner.get("limit_usd"),
             "limit_remaining_usd": inner.get("limit_remaining_usd"),
             "fetched_at": inner.get("fetched_at"),
-            "_changed_at": row["updated_at"],
+            "_changed_key": (row["updated_at"], row["row_id"]),
         }
         current = account_latest.get(account_key)
         if current is None or str(candidate.get("fetched_at") or "") > str(current.get("fetched_at") or ""):
-            if current is not None and current["_changed_at"] > candidate["_changed_at"]:
-                candidate["_changed_at"] = current["_changed_at"]
+            if current is not None and current["_changed_key"] > candidate["_changed_key"]:
+                candidate["_changed_key"] = current["_changed_key"]
             account_latest[account_key] = candidate
-        elif row["updated_at"] > current["_changed_at"]:
-            current["_changed_at"] = row["updated_at"]
+        elif candidate["_changed_key"] > current["_changed_key"]:
+            current["_changed_key"] = candidate["_changed_key"]
     # Newest first means the latest replica change (CONTRIBUTING); last_at and
     # fetched_at stay as displayed facts.
     lanes = sorted(
         lane_groups.values(),
-        key=lambda row: (row["_changed_at"], row["login"], row["session_id"], row["provider"], row["model"]),
+        key=lambda row: (
+            row["_changed_key"],
+            row["login"],
+            row["session_id"],
+            row["provider"],
+            row["model"],
+        ),
         reverse=True,
     )
     accounts = sorted(
         account_latest.values(),
-        key=lambda row: (row["_changed_at"], row["login"], row["account"]),
+        key=lambda row: (row["_changed_key"], row["login"], row["account"]),
         reverse=True,
     )
     for item in (*lanes, *accounts):
-        item.pop("_changed_at", None)
+        item.pop("_changed_key", None)
     return {"lanes": lanes, "accounts": accounts, "grok": grok}
 
 

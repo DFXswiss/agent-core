@@ -30,7 +30,7 @@ class _FailingReplicaConnection:
         self.connection.close()
 
 
-def test_store_migrates_device_confirmed_by_without_losing_rows(tmp_path: Path) -> None:
+def test_store_migrates_columns_without_losing_rows(tmp_path: Path) -> None:
     database = tmp_path / "old-hub.sqlite"
     connection = sqlite3.connect(database)
     try:
@@ -44,6 +44,23 @@ def test_store_migrates_device_confirmed_by_without_losing_rows(tmp_path: Path) 
             "VALUES (?, ?, ?, ?, ?, NULL)",
             ("old-device", "alice", "old laptop", "old-token", "2026-01-01T00:00:00Z"),
         )
+        connection.execute(
+            "CREATE TABLE request_reservation ("
+            "actor TEXT, activity_type TEXT, request_id TEXT, status TEXT NOT NULL, "
+            "lease_until TEXT NOT NULL, PRIMARY KEY (actor, activity_type, request_id))"
+        )
+        connection.execute(
+            "INSERT INTO request_reservation "
+            "(actor, activity_type, request_id, status, lease_until) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                "alice",
+                "assignment.created",
+                "old-request",
+                "pending",
+                "2026-11-05T10:02:00Z",
+            ),
+        )
         connection.commit()
     finally:
         connection.close()
@@ -51,45 +68,76 @@ def test_store_migrates_device_confirmed_by_without_losing_rows(tmp_path: Path) 
     store = Store(str(database))
     try:
         columns = {row["name"] for row in store.query("PRAGMA table_info(device)")}
+        reservation_columns = {
+            row["name"] for row in store.query("PRAGMA table_info(request_reservation)")
+        }
         row = store.query_one("SELECT * FROM device WHERE id = ?", ("old-device",))
+        reservation = store.query_one(
+            "SELECT * FROM request_reservation WHERE request_id = ?", ("old-request",)
+        )
 
         assert "confirmed_by" in columns
-        assert store.query_one(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
-            ("request_reservation",),
-        ) is not None
+        assert "owner" in reservation_columns
         assert row is not None
         assert row["github_login"] == "alice"
         assert row["confirmed_by"] is None
+        assert reservation is not None
+        assert reservation["owner"] == ""
     finally:
         store.close()
+
+    reopened = Store(str(database))
+    try:
+        reservation = reopened.query_one(
+            "SELECT owner FROM request_reservation WHERE request_id = ?", ("old-request",)
+        )
+        assert reservation is not None
+        assert reservation["owner"] == ""
+    finally:
+        reopened.close()
 
 
 def test_request_reservation_busy_expiry_finish_and_release(tmp_path: Path) -> None:
     store = Store(str(tmp_path / "reservations.sqlite"))
     key = ("alice", "assignment.created", "request-one")
+    first_owner = "owner-one"
+    second_owner = "owner-two"
     try:
         assert store.reserve_request(
-            *key, "2026-11-05T10:00:00Z", "2026-11-05T10:02:00Z"
+            *key, first_owner, "2026-11-05T10:00:00Z", "2026-11-05T10:02:00Z"
         ) == "reserved"
         assert store.reserve_request(
-            *key, "2026-11-05T10:01:00Z", "2026-11-05T10:03:00Z"
+            *key, second_owner, "2026-11-05T10:01:00Z", "2026-11-05T10:03:00Z"
         ) == "busy"
         assert store.reserve_request(
-            *key, "2026-11-05T10:02:00Z", "2026-11-05T10:04:00Z"
+            *key, second_owner, "2026-11-05T10:02:00Z", "2026-11-05T10:04:00Z"
         ) == "reserved"
-        store.finish_request(*key)
+        assert not store.renew_request(
+            *key,
+            first_owner,
+            "2026-11-05T10:02:01Z",
+            "2026-11-05T10:04:01Z",
+        )
+        assert not store.release_request(*key, first_owner)
+        assert not store.finish_request(*key, first_owner)
+        assert store.renew_request(
+            *key,
+            second_owner,
+            "2026-11-05T10:02:01Z",
+            "2026-11-05T10:04:01Z",
+        )
+        assert store.finish_request(*key, second_owner)
         assert store.reserve_request(
-            *key, "2026-11-05T10:05:00Z", "2026-11-05T10:07:00Z"
+            *key, "owner-three", "2026-11-05T10:05:00Z", "2026-11-05T10:07:00Z"
         ) == "done"
 
         released = ("alice", "assignment.reply", "request-two")
         assert store.reserve_request(
-            *released, "2026-11-05T10:00:00Z", "2026-11-05T10:02:00Z"
+            *released, first_owner, "2026-11-05T10:00:00Z", "2026-11-05T10:02:00Z"
         ) == "reserved"
-        store.release_request(*released)
+        assert store.release_request(*released, first_owner)
         assert store.reserve_request(
-            *released, "2026-11-05T10:00:01Z", "2026-11-05T10:02:01Z"
+            *released, second_owner, "2026-11-05T10:00:01Z", "2026-11-05T10:02:01Z"
         ) == "reserved"
     finally:
         store.close()

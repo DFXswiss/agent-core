@@ -269,7 +269,7 @@ Cookie session after GitHub OAuth.
 - `GET /session?id=<id>` — the session page using a query-safe id. `GET /sessions/{id}` remains supported.
 - `GET /api/session-timeline?id=<id>` — the newest 5,000 related replica rows, returned oldest first, with `truncated: true` when capped. `GET /api/sessions/{id}/timeline` remains supported and returns the same body. A missing website cookie returns 401; the session page renders this as **Signed out — sign in on the dashboard** with a link to `/`.
 - `POST /api/assignments` — create and verify an agent-assigned GitHub issue using the owner's OAuth token.
-- `GET /api/assignments?agent=<login>` — newest-first assignment activity, enriched best-effort with issue state, assignees, and the newest 20 comments.
+- `GET /api/assignments?agent=<login>` — newest-first assignment activity. Every row has an `enriched` boolean. At most the newest 50 assignments are enriched best-effort with issue state, assignees, and the newest 20 comments; older rows have `enriched: false`. Enriched comments contain `author`, `created_at`, `body`, and `url`; `body` is cut to 4,000 characters.
 - `POST /api/assignments/{owner}/{name}/{number}/comments` — reply using an owner OAuth token after a fresh assignee check.
 - `GET /api/usage` — lane-token aggregates, newest OpenRouter account snapshots, and unchanged Grok snapshot rows.
 - `POST /api/pings` — `{to, kind, task_id?, body?}`; `kind` is `review-request|ping|question`. Target must be visible.

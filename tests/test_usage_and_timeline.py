@@ -209,6 +209,57 @@ def test_usage_arrays_are_newest_first_with_row_id_tiebreak(agent_hub: TestClien
     ]
 
 
+def test_usage_group_tiebreak_uses_row_id_before_business_fields(
+    agent_hub: TestClient,
+) -> None:
+    sign_in(agent_hub, "code-alice")
+    updated_at = "2026-11-05T10:00:00Z"
+    for row_id, session_id in (
+        ("lane-z", "session-a"),
+        ("lane-a", "session-z"),
+    ):
+        _insert_replica(
+            agent_hub,
+            table="activity",
+            row_id=row_id,
+            updated_at=updated_at,
+            login="helperbot",
+            payload={
+                "id": row_id,
+                "type": "lane.run",
+                "session_id": session_id,
+                "payload": {"vendor": "anthropic", "model": "model-a"},
+            },
+        )
+    for row_id, account in (
+        ("account-z", "account-a"),
+        ("account-a", "account-z"),
+    ):
+        _insert_replica(
+            agent_hub,
+            table="activity",
+            row_id=row_id,
+            updated_at=updated_at,
+            login="helperbot",
+            payload={
+                "id": row_id,
+                "type": "usage.snapshot",
+                "payload": {"vendor": "openrouter", "account": account},
+            },
+        )
+
+    body = agent_hub.get("/api/usage").json()
+
+    assert [row["session_id"] for row in body["lanes"]] == [
+        "session-a",
+        "session-z",
+    ]
+    assert [row["account"] for row in body["accounts"]] == [
+        "account-a",
+        "account-z",
+    ]
+
+
 def test_usage_order_uses_replica_change_not_payload_time(agent_hub: TestClient) -> None:
     sign_in(agent_hub, "code-alice")
     for suffix, updated_at, payload_at in (

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
@@ -12,12 +13,34 @@ from .config import Config
 
 GITHUB_SEARCH_URL = "https://api.github.com/search/issues"
 GITHUB_API_URL = "https://api.github.com"
+REPOSITORY_OWNER_RE = re.compile(r"^[A-Za-z0-9-]{1,39}$")
+REPOSITORY_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
 
 
 class GitHubError(ValueError):
     def __init__(self, message: str, status_code: int | None = None) -> None:
         super().__init__(message)
         self.status_code = status_code
+
+
+def valid_repository_name(repo: object) -> bool:
+    if not isinstance(repo, str):
+        return False
+    parts = repo.split("/")
+    if len(parts) != 2:
+        return False
+    owner, name = parts
+    return (
+        REPOSITORY_OWNER_RE.fullmatch(owner) is not None
+        and REPOSITORY_NAME_RE.fullmatch(name) is not None
+        and name not in {".", ".."}
+    )
+
+
+def _repository_path(repo: str) -> str:
+    if not valid_repository_name(repo):
+        raise GitHubError("invalid GitHub repository name")
+    return f"/repos/{repo}"
 
 
 @dataclass(frozen=True)
@@ -266,9 +289,10 @@ class RealGitHub(GitHub):
     def create_issue(
         self, token: str, repo: str, title: str, body: str, assignees: list[str]
     ) -> dict[str, Any]:
+        repository_path = _repository_path(repo)
         result = self._request_json(
             "POST",
-            f"/repos/{repo}/issues",
+            f"{repository_path}/issues",
             token,
             json_body={"title": title, "body": body, "assignees": assignees},
             expected=(201,),
@@ -280,9 +304,10 @@ class RealGitHub(GitHub):
     def recent_issues_by_creator(
         self, token: str, repo: str, creator: str
     ) -> list[dict[str, Any]]:
+        repository_path = _repository_path(repo)
         result = self._request_json(
             "GET",
-            f"/repos/{repo}/issues",
+            f"{repository_path}/issues",
             token,
             params={
                 "creator": creator,
@@ -297,13 +322,15 @@ class RealGitHub(GitHub):
         return [item for item in result if isinstance(item, dict)]
 
     def repository(self, token: str, repo: str) -> dict[str, Any]:
-        result = self._request_json("GET", f"/repos/{repo}", token)
+        result = self._request_json("GET", _repository_path(repo), token)
         if not isinstance(result, dict):
             raise GitHubError("GitHub repository lookup returned an invalid response")
         return result
 
     def issue(self, token: str, repo: str, number: int) -> dict[str, Any]:
-        result = self._request_json("GET", f"/repos/{repo}/issues/{number}", token)
+        result = self._request_json(
+            "GET", f"{_repository_path(repo)}/issues/{number}", token
+        )
         if not isinstance(result, dict):
             raise GitHubError("GitHub issue lookup returned an invalid response")
         return result
@@ -311,7 +338,7 @@ class RealGitHub(GitHub):
     def add_assignees(self, token: str, repo: str, number: int, assignees: list[str]) -> dict[str, Any]:
         result = self._request_json(
             "POST",
-            f"/repos/{repo}/issues/{number}/assignees",
+            f"{_repository_path(repo)}/issues/{number}/assignees",
             token,
             json_body={"assignees": assignees},
             expected=(200, 201),
@@ -323,7 +350,7 @@ class RealGitHub(GitHub):
     def create_issue_comment(self, token: str, repo: str, number: int, body: str) -> dict[str, Any]:
         result = self._request_json(
             "POST",
-            f"/repos/{repo}/issues/{number}/comments",
+            f"{_repository_path(repo)}/issues/{number}/comments",
             token,
             json_body={"body": body},
             expected=(201,),
@@ -333,7 +360,7 @@ class RealGitHub(GitHub):
         return result
 
     def issue_comments(self, token: str, repo: str, number: int) -> list[dict[str, Any]]:
-        path = f"/repos/{repo}/issues/{number}/comments"
+        path = f"{_repository_path(repo)}/issues/{number}/comments"
         first, headers = self._request_json_with_headers(
             "GET", path, token, params={"per_page": 100}
         )
